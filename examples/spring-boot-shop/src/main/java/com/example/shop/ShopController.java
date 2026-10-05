@@ -7,6 +7,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -15,6 +18,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.client.RestClient;
 import org.springframework.web.server.ResponseStatusException;
 
 @RestController
@@ -36,7 +40,16 @@ public class ShopController {
           "sku_1", new Product("sku_1", "Mug", 1200),
           "sku_2", new Product("sku_2", "Poster", 2500));
 
+  private static final Logger LOG = LoggerFactory.getLogger(ShopController.class);
+
   private final AtomicInteger orders = new AtomicInteger();
+  private final RestClient inventory;
+
+  // Spring Boot's RestClient.Builder: the starter traces its requests.
+  public ShopController(
+      RestClient.Builder builder, @Value("${inventory.url}") String inventoryUrl) {
+    this.inventory = builder.baseUrl(inventoryUrl).build();
+  }
 
   @GetMapping("/products/{id}")
   public Product product(@PathVariable String id) {
@@ -60,7 +73,11 @@ public class ShopController {
       Fixwire.setUser(new User(userId)); // this request's scope only
     }
     Fixwire.setTag("sku", in.sku());
-    Fixwire.addBreadcrumb("order", "order received for " + in.sku());
+    LOG.info("order received for {}", in.sku()); // a breadcrumb
+    if (!reserve(in.sku())) {
+      LOG.error("no stock for {}", in.sku()); // an event, in this request
+      return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", "out of stock"));
+    }
     String orderId = "ord_" + orders.incrementAndGet();
     try {
       charge(in.card());
@@ -87,6 +104,18 @@ public class ShopController {
     // A bug: with no orders this divides by zero. The exception escapes the app;
     // the filter reports it as a crash and Spring answers 500.
     return Map.of("averageCents", total / cents.size());
+  }
+
+  /** Asks the inventory service to hold one item: a traced call, carrying the trace. */
+  private boolean reserve(String sku) {
+    return inventory
+        .post()
+        .uri("/reservations?sku={sku}", sku)
+        .retrieve()
+        .onStatus(status -> true, (request, response) -> {}) // the status code says it
+        .toBodilessEntity()
+        .getStatusCode()
+        .is2xxSuccessful();
   }
 
   private static void charge(String card) {

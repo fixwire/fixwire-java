@@ -12,6 +12,7 @@ include(
     "fixwire-okhttp",
     "fixwire-httpclient",
     "fixwire-logback",
+    "fixwire-spring-boot",
 )
 
 // Real apps for the docs, run by their tests against a fake ingest.

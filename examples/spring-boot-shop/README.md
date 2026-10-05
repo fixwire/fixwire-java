@@ -1,13 +1,15 @@
 # Spring Boot shop
 
 A small Spring Boot 4 API with Fixwire set up the way a production service
-would be.
+would be: the `fixwire-spring-boot` starter and a few properties, no code.
 
 ```sh
 FIXWIRE_DSN=https://<key>@<host> ./gradlew :examples:spring-boot-shop:bootRun   # from sdks/java
 ```
 
-Then:
+It listens on `:8080` and reserves stock at an inventory service
+(`inventory.url`, default `http://localhost:8081`; without one, orders fail
+at the reservation, and that is reported too). Then:
 
 ```sh
 curl localhost:8080/products/sku_1                      # 200, with a database span
@@ -23,43 +25,39 @@ What arrives in Fixwire:
 
 - **The declined payment** as an error of `POST /orders`: the chain
   (`charging order ord_2` caused by `PaymentException`), the user
-  `user-2`, the `sku` tag, the order as context and the breadcrumb before
-  it. The customer got a 402; the error was handled.
+  `user-2`, the `sku` tag, the order as context, and the breadcrumbs that
+  led to it (the `order received` log line, the call to the inventory
+  service). The customer got a 402; the error was handled.
+- **A logged error**: `LOG.error("no stock for {}", sku)` is an event of
+  its request, with its user and tags, when the inventory says sold out.
 - **The crash** in `GET /admin/report` (`ArithmeticException: / by
-  zero`): nothing in the app caught it, so the filter reports it as a crash
-  and Spring answers 500.
-- **A trace per request**, named after its route (`GET /products/{id}`,
-  from Spring MVC), with the database lookup under it. A caller's
-  `traceparent` is continued.
+  zero`): nothing in the app caught it, so it is reported as a crash and
+  Spring answers 500. Frames of `com.example.shop` are marked as your code.
+- **A trace per request**, named after its route (`GET /products/{id}`),
+  with the database lookup and the `RestClient` call to the inventory
+  service under it. The inventory service gets a `traceparent` header and
+  continues the trace; other hosts get none.
 - **Release health** for `shop@1.0.0`: each request is a session, ended
   well, with an error, or crashed.
 
-How it is wired, in `FixwireConfig.java`:
+How it is wired:
 
-```java
-@Configuration
-public class FixwireConfig {
-  public FixwireConfig(@Value("${fixwire.dsn:}") String dsn, @Value("${fixwire.release:shop@1.0.0}") String release) {
-    Fixwire.init(o -> {
-      o.setDsn(dsn);              // empty: FIXWIRE_DSN
-      o.setRelease(release);
-      o.setTracesSampleRate(1.0);
-    });
-  }
-
-  @Bean
-  public FilterRegistrationBean<FixwireFilter> fixwireFilter() {
-    FilterRegistrationBean<FixwireFilter> f = new FilterRegistrationBean<>(new FixwireFilter());
-    f.setOrder(Ordered.HIGHEST_PRECEDENCE); // first, so it sees every request and every escaping exception
-    return f;
-  }
-
-  @PreDestroy
-  public void close() {
-    Fixwire.close(2000); // send what is left when the app stops
-  }
-}
+```kotlin
+// build.gradle.kts
+implementation("io.fixwire:fixwire-spring-boot:0.1.0")
 ```
 
-In controllers, `Fixwire.setUser`, `Fixwire.setTag` and
-`Fixwire.captureException` act on the current request's scope only.
+```properties
+# application.properties
+fixwire.release=shop@1.0.0
+fixwire.traces-sample-rate=1.0
+fixwire.trace-propagation-targets=${inventory.url}
+```
+
+The starter sets Fixwire up when the app starts (the DSN from
+`fixwire.dsn` or `FIXWIRE_DSN`), puts the request filter first, traces
+requests of the `RestClient.Builder` and `RestTemplateBuilder` Spring Boot
+gives out, sends Logback records (breadcrumbs from `INFO`, events from
+`ERROR`), and flushes when the app stops. In controllers,
+`Fixwire.setUser`, `Fixwire.setTag` and `Fixwire.captureException` act on
+the current request only.

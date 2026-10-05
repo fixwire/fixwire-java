@@ -7,7 +7,11 @@ depends on nothing.
 | Module | For |
 |---|---|
 | `io.fixwire:fixwire` | Every app: errors, spans, sessions, check-ins, feedback, `java.util.logging` |
-| `io.fixwire:fixwire-servlet` | Servlet apps (Spring Boot 3, Tomcat, Jetty, Undertow; Jakarta Servlet, Java 11+) |
+| `io.fixwire:fixwire-spring-boot` | Spring Boot 4 apps: everything below from `application.properties` (Java 17+) |
+| `io.fixwire:fixwire-servlet` | Servlet apps (Tomcat, Jetty, Undertow; Jakarta Servlet, Java 11+) |
+| `io.fixwire:fixwire-logback` | Logback records as breadcrumbs and events (Java 11+) |
+| `io.fixwire:fixwire-okhttp` | OkHttp requests as client spans and breadcrumbs |
+| `io.fixwire:fixwire-httpclient` | `java.net.http` requests as client spans and breadcrumbs (Java 11+) |
 | `io.fixwire:fixwire-kotlin` | Kotlin coroutines |
 
 ```kotlin
@@ -55,6 +59,26 @@ is left to be sent.
 - It speaks the Fixwire protocol: errors, messages and spans travel as
   OpenTelemetry's OTLP/HTTP (JSON), with structured stack traces,
   breadcrumbs and redaction on top.
+
+## Spring Boot
+
+```kotlin
+implementation("io.fixwire:fixwire-spring-boot:0.1.0")
+```
+
+```properties
+fixwire.release=shop@1.4.0
+fixwire.traces-sample-rate=0.2
+fixwire.trace-propagation-targets=https://inventory.internal
+```
+
+That's all: the starter sets Fixwire up when the app starts (the DSN from
+`fixwire.dsn` or `FIXWIRE_DSN`), reports each request (its scope, crashes,
+release health, a server span named after the route), traces the requests
+of the `RestClient.Builder` and `RestTemplateBuilder` Spring Boot gives
+out, sends Logback records, marks your application's package as your code,
+and flushes when the app stops. `fixwire.logging.*` sets the Logback levels
+(or turns it off).
 
 ## Errors
 
@@ -108,15 +132,31 @@ when it closes. `Fixwire.spanBuilder(name).continueTrace(traceparent,
 tracestate, baggage).start()` continues a caller's trace; its sampling
 decision holds. Trace headers go only to `setTracePropagationTargets`.
 
+Outgoing requests become client spans of the current trace, with an `http`
+breadcrumb each:
+
+```java
+OkHttpClient okhttp = new OkHttpClient.Builder().addInterceptor(new FixwireInterceptor()).build();
+HttpClient jdk = FixwireHttpClient.wrap(HttpClient.newHttpClient());
+```
+
+Other clients can use `OutgoingRequest` the same way.
+
 ## Logs
 
 ```java
 Logger.getLogger("").addHandler(new FixwireHandler()); // java.util.logging
 ```
 
-`INFO` and above become breadcrumbs; `SEVERE` and above are sent as events,
-as the record's exception when it has one (once, if the app captured it
-already).
+```xml
+<!-- logback.xml (the Spring Boot starter does this by itself) -->
+<appender name="FIXWIRE" class="io.fixwire.logback.FixwireAppender"/>
+<root level="INFO"><appender-ref ref="FIXWIRE"/></root>
+```
+
+`INFO` and above become breadcrumbs; `SEVERE` (`ERROR` in Logback) and
+above are sent as events, as the record's exception when it has one (once,
+if the app captured it already). Logback's MDC goes with them.
 
 ## Cron jobs and feedback
 
