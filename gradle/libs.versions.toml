@@ -5,6 +5,7 @@ servlet = "6.1.0"
 kotlin = "2.4.20"
 coroutines = "1.11.0"
 ktlint = "1.8.0"
+spring-boot = "4.1.1"
 jetty = "12.1.14"
 google-java-format = "1.36.1" # 1.37 is newer than Spotless 8.9 handles
 
@@ -18,5 +19,6 @@ servlet-api = { module = "jakarta.servlet:jakarta.servlet-api", version.ref = "s
 jetty-servlet = { module = "org.eclipse.jetty.ee10:jetty-ee10-servlet", version.ref = "jetty" }
 
 [plugins]
+spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 spotless = { id = "com.diffplug.spotless", version = "8.9.0" }

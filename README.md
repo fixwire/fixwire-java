@@ -149,6 +149,13 @@ Fixwire.captureFeedback(f); // a negative score opens a user_feedback issue for 
 | `uncaughtExceptionHandler` | on | Report exceptions nothing caught |
 | `shutdownTimeoutMillis` | 2000 | How long shutdown waits to send |
 
+## Examples
+
+[examples](examples) holds real apps, run by their tests against a fake
+ingest: a Spring Boot API ([spring-boot-shop](examples/spring-boot-shop)), a
+cron job ([nightly-report](examples/nightly-report)) and a Kotlin coroutine
+worker ([order-worker](examples/order-worker)).
+
 ## Building
 
 ```sh
