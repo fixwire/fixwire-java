@@ -19,21 +19,21 @@ import kotlin.coroutines.CoroutineContext
  * ```
  */
 public class FixwireContext(
-  /** The hub; by default a copy of the current one. */
-  public val hub: Hub = Hub.current().copy(),
+    /** The hub; by default a copy of the current one. */
+    public val hub: Hub = Hub.current().copy(),
 ) : AbstractCoroutineContextElement(Key),
-  ThreadContextElement<Hub.Binding> {
-  /** The key of the element in a coroutine context. */
-  public companion object Key : CoroutineContext.Key<FixwireContext>
+    ThreadContextElement<Hub.Binding> {
+    /** The key of the element in a coroutine context. */
+    public companion object Key : CoroutineContext.Key<FixwireContext>
 
-  override fun updateThreadContext(context: CoroutineContext): Hub.Binding = hub.bind()
+    override fun updateThreadContext(context: CoroutineContext): Hub.Binding = hub.bind()
 
-  override fun restoreThreadContext(
-    context: CoroutineContext,
-    oldState: Hub.Binding,
-  ) {
-    oldState.close()
-  }
+    override fun restoreThreadContext(
+        context: CoroutineContext,
+        oldState: Hub.Binding,
+    ) {
+        oldState.close()
+    }
 }
 
 /**
@@ -41,18 +41,18 @@ public class FixwireContext(
  * returns. The span stays current across suspensions when the coroutine has a [FixwireContext].
  */
 public suspend fun <T> withSpan(
-  name: String,
-  op: String,
-  block: suspend (Span) -> T,
+    name: String,
+    op: String,
+    block: suspend (Span) -> T,
 ): T {
-  val hub = Hub.current()
-  val span = hub.spanBuilder(name).op(op).start()
-  return try {
-    withContext(FixwireContext(hub)) { block(span) }
-  } catch (e: Throwable) {
-    span.setError(e)
-    throw e
-  } finally {
-    span.close()
-  }
+    val hub = Hub.current()
+    val span = hub.spanBuilder(name).op(op).start()
+    return try {
+        withContext(FixwireContext(hub)) { block(span) }
+    } catch (e: Throwable) {
+        span.setError(e)
+        throw e
+    } finally {
+        span.close()
+    }
 }

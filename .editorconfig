@@ -1,0 +1,18 @@
+# The Java SDK's own settings, so ktlint formats it alike in the monorepo and
+# in its own repository. Java is formatted by google-java-format.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.{kt,kts}]
+indent_size = 4
+ktlint_code_style = ktlint_official
+
+[*.md]
+trim_trailing_whitespace = false
