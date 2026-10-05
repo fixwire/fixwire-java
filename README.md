@@ -1,0 +1,164 @@
+# fixwire for Java and Kotlin
+
+The Fixwire SDK for the JVM: errors with their causes, traces, release
+health, cron monitors and feedback. The core runs on Java 8 and newer and
+depends on nothing.
+
+| Module | For |
+|---|---|
+| `io.fixwire:fixwire` | Every app: errors, spans, sessions, check-ins, feedback, `java.util.logging` |
+| `io.fixwire:fixwire-servlet` | Servlet apps (Spring Boot 3, Tomcat, Jetty, Undertow; Jakarta Servlet, Java 11+) |
+| `io.fixwire:fixwire-kotlin` | Kotlin coroutines |
+
+```kotlin
+// build.gradle.kts
+dependencies { implementation("io.fixwire:fixwire:0.1.0") }
+```
+
+```java
+Fixwire.init(o -> {
+  o.setDsn("https://fw_pk_live_…@ingest.eu.fixwire.io");
+  o.setRelease("api@1.4.0");
+});
+
+try {
+  charge(order);
+} catch (PaymentException e) {
+  Fixwire.captureException(e);
+}
+```
+
+```kotlin
+Fixwire.init {
+    it.dsn = "https://fw_pk_live_…@ingest.eu.fixwire.io"
+    it.release = "api@1.4.0"
+}
+```
+
+The DSN is your project's publishable key and the ingest host,
+`https://<key>@<host>`. Without one the SDK reads `FIXWIRE_DSN`; without
+either it does nothing. `FIXWIRE_RELEASE` and `FIXWIRE_ENVIRONMENT` work the
+same way.
+
+`init` also reports exceptions no code caught (the handler that was there
+before still runs), and the JVM's shutdown waits up to two seconds for what
+is left to be sent.
+
+**What's different**
+- Secrets and personal data are masked on the device, with the same rules
+  as the Fixwire server (`setRedact(false)` turns it off).
+- A crash loop costs a few events and a count, not your quota
+  (`getErrorBudget()`).
+- Captures never block: one daemon thread sends from a bounded queue,
+  retries with backoff and honours rate limits, pausing only the kind of
+  data a limit names.
+- It speaks the Fixwire protocol: errors, messages and spans travel as
+  OpenTelemetry's OTLP/HTTP (JSON), with structured stack traces,
+  breadcrumbs and redaction on top.
+
+## Errors
+
+An exception is sent with its causes and their stacks. Frames of the JDK,
+Kotlin and well-known libraries are marked as not yours; name your packages
+with `setInAppIncludes` when the defaults guess wrong.
+
+```java
+Fixwire.configureScope(s -> {
+  s.setUser(new User("user-1"));
+  s.setTag("plan", "team");
+});
+Fixwire.addBreadcrumb("cart", "checkout started");
+Fixwire.captureMessage("disk usage above 90%", Level.WARNING);
+```
+
+## Requests and threads
+
+`Fixwire`'s methods use the current thread's hub. A request (or a job)
+gets its own copy, so what it sets stays with it:
+
+```java
+try (Hub.Binding b = Hub.current().copy().bind()) {
+  handle(request);
+}
+executor.submit(Fixwire.wrap(() -> work())); // the task runs with a copy of the hub
+```
+
+**Servlets** (`fixwire-servlet`): register `FixwireFilter` first, for every
+request. It does the above for each request, sends exceptions that escape
+the app as crashes, counts the request for release health and, with tracing
+on, makes it a server span that continues the caller's trace, named after
+the route (Spring MVC's pattern, or the servlet mapping).
+
+**Coroutines** (`fixwire-kotlin`): `launch(FixwireContext()) { … }` keeps a
+coroutine's hub on whichever thread runs it; `withSpan(name, op) { … }`
+times a suspending block.
+
+## Tracing
+
+```java
+o.setTracesSampleRate(0.2);
+
+try (Span span = Fixwire.startSpan("SELECT carts", "db.query")) {
+  …
+}
+```
+
+A span without a parent in the process is sent with the spans under it
+when it closes. `Fixwire.spanBuilder(name).continueTrace(traceparent,
+tracestate, baggage).start()` continues a caller's trace; its sampling
+decision holds. Trace headers go only to `setTracePropagationTargets`.
+
+## Logs
+
+```java
+Logger.getLogger("").addHandler(new FixwireHandler()); // java.util.logging
+```
+
+`INFO` and above become breadcrumbs; `SEVERE` and above are sent as events,
+as the record's exception when it has one (once, if the app captured it
+already).
+
+## Cron jobs and feedback
+
+```java
+Fixwire.withMonitor("nightly-report",
+    CheckIn.MonitorConfig.crontab("0 3 * * *").timezone("Europe/Berlin"),
+    () -> report());
+
+Feedback f = new Feedback("Refunded the wrong order");
+f.setScore(-1);
+f.setTraceId(runTraceId);
+Fixwire.captureFeedback(f); // a negative score opens a user_feedback issue for the agent
+```
+
+## Options
+
+| Option | Default | |
+|---|---|---|
+| `dsn` | `FIXWIRE_DSN` | Where to send; nothing is sent without one |
+| `release`, `environment` | `FIXWIRE_RELEASE`, `production` | Release health needs a release |
+| `serviceName` | `OTEL_SERVICE_NAME`, else `api` of `api@1.4.0` | |
+| `sampleRate` | 1 | Share of errors sent |
+| `tracesSampleRate` | 0 | Share of new traces kept |
+| `tracePropagationTargets` | none | URLs that receive trace headers |
+| `beforeSend`, `beforeBreadcrumb` | | Change or drop events and breadcrumbs |
+| `sendDefaultPii` | off | Send the user's IP address and identifying headers |
+| `redact`, `sensitiveKeys` | on, the server's keys | On-device masking |
+| `errorBudget` | 10 per issue, then 1 a minute; 600 a minute | |
+| `inAppIncludes`, `inAppExcludes` | all but the JDK's and known libraries' | Which frames are your code |
+| `uncaughtExceptionHandler` | on | Report exceptions nothing caught |
+| `shutdownTimeoutMillis` | 2000 | How long shutdown waits to send |
+
+## Building
+
+```sh
+./gradlew build          # tests, Javadoc, formatting (google-java-format, ktlint)
+./gradlew spotlessApply  # formats
+```
+
+The build runs on JDK 21, which Gradle downloads when it is missing; the
+libraries are compiled for Java 8 (the servlet module for Java 11).
+
+## License
+
+MIT.

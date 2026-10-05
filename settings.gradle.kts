@@ -5,4 +5,4 @@ plugins {
 
 rootProject.name = "fixwire-java"
 
-include("fixwire", "fixwire-servlet")
+include("fixwire", "fixwire-servlet", "fixwire-kotlin")
