@@ -11,6 +11,7 @@ include(
     "fixwire-kotlin",
     "fixwire-okhttp",
     "fixwire-httpclient",
+    "fixwire-logback",
 )
 
 // Real apps for the docs, run by their tests against a fake ingest.
