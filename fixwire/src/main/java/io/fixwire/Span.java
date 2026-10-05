@@ -199,6 +199,17 @@ public final class Span implements AutoCloseable {
       scope.setSpan(s);
       return s;
     }
+
+    /**
+     * Starts the span without making it current: for work with no spans of its own under it, such
+     * as an outgoing request that may end on another thread.
+     *
+     * @return the span
+     */
+    public Span startDetached() {
+      Span p = noParent ? null : parent != null ? parent : hub.getScope().getSpan();
+      return new Span(this, null, p);
+    }
   }
 
   static Kind kindOf(String op) {

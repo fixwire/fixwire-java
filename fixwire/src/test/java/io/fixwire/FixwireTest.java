@@ -305,6 +305,53 @@ class FixwireTest {
   }
 
   @Test
+  void tracesOutgoingRequests() {
+    Options o = new Options();
+    o.setTracesSampleRate(1);
+    o.setTracePropagationTargets(List.of("api.internal"));
+    Hub hub = ingest.hub(o);
+    Map<String, String> internal = new java.util.HashMap<>();
+    Map<String, String> partner = new java.util.HashMap<>();
+    try (Span job = hub.spanBuilder("job").op("task").start()) {
+      OutgoingRequest a =
+          OutgoingRequest.start(hub, "get", "https://api.internal/prices?sku=1", internal::put);
+      a.end(503);
+      OutgoingRequest b =
+          OutgoingRequest.start(hub, "POST", "https://partner.example.com/hook", partner::put);
+      b.fail(new java.io.IOException("connection refused"));
+      assertEquals(job, hub.getScope().getSpan(), "client spans don't become current");
+      assertTrue(internal.get("traceparent").startsWith("00-" + job.getTraceId() + "-"));
+      assertFalse(internal.get("traceparent").contains(job.getSpanId()), "the client span's id");
+      assertTrue(partner.isEmpty(), "no trace headers for a service that is no target");
+    }
+    hub.captureMessage("after", null);
+    hub.flush(5000);
+    Map<String, Map<String, Object>> byName = new java.util.HashMap<>();
+    for (Map<String, Object> s : spans(ingest.requests("/v1/traces"))) {
+      byName.put((String) s.get("name"), s);
+    }
+    Map<String, Object> prices = byName.get("GET https://api.internal/prices");
+    assertEquals(3, prices.get("kind"));
+    assertEquals(503L, kv(prices.get("attributes")).get("http.response.status_code"));
+    assertEquals("api.internal", kv(prices.get("attributes")).get("server.address"));
+    assertEquals(2, ((Map<?, ?>) prices.get("status")).get("code"));
+    assertEquals(
+        "connection refused",
+        ((Map<?, ?>) byName.get("POST https://partner.example.com/hook").get("status"))
+            .get("message"));
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> crumbs =
+        (List<Map<String, Object>>)
+            kv(logRecords(ingest.requests("/v1/logs")).get(0).get("attributes"))
+                .get("fixwire.breadcrumbs");
+    assertEquals(2, crumbs.size());
+    assertEquals("error", crumbs.get(0).get("level"));
+    assertEquals(
+        Map.of("method", "GET", "url", "https://api.internal/prices", "status_code", 503L),
+        crumbs.get(0).get("data"));
+  }
+
+  @Test
   void continuesCallersTraces() {
     Options o = new Options();
     o.setTracesSampleRate(0);
