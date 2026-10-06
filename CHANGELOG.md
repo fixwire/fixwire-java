@@ -23,10 +23,11 @@ API.
   - An error over 1 MB leaves out its breadcrumbs, then its contexts, and is dropped if still over; spans go in requests of at most 100 and 5 MB, and a span that can't fit alone is dropped.
   - Release health counts 5,000 users apart per send (then without the user) and sends at most 5,000 aggregates a request.
   - `Retry-After` may be an HTTP date; a 5xx with `Retry-After` pauses all data; retries wait about 1 s, then twice as long; a request whose next try is over 5 minutes away is dropped; `maxQueue` requests wait to be sent and as many for a retry.
-  - An incoming `traceparent` needs version `00` and lower-case hex; `tracestate` over 512 bytes, `baggage` over 8,192 bytes, or either with a control character, is dropped whole.
+  - An incoming `traceparent` needs version `00` and lower-case hex; `tracestate` over 512 bytes, `baggage` over 8,192 bytes, or either with a control character other than tab (W3C's list whitespace), is dropped whole.
   - `tracePropagationTargets` match a URL without its user info, query and fragment: a target with `://` is a URL prefix, any other a host with its subdomains (`example.com` no longer matches `badexample.com` or `example.com.evil.net`).
-- Redaction has the server's new `secret_assignment` rule: secrets given to compound names (`access_token`, `client_secret`, `csrfToken`, `PHPSESSID`, `X-Amz-Signature`) and OAuth codes in URLs are masked, in linear time; span status messages are masked too, and a value redaction fails on is sent as `[Filtered]`.
+- Redaction has the server's new `secret_assignment` rule: secrets given to compound names (`access_token`, `client_secret`, `csrfToken`, `PHPSESSID`, `X-Amz-Signature`) and OAuth codes in URLs are masked, in linear time; span status messages are masked too, and a value redaction fails on is sent as `[Filtered]`. The app's own configuration (release, environment, service and server name, monitor slugs) is cut to `maxValueLength` but sent as given.
 - Nothing the SDK does throws into the app: captures, feedback and check-ins log what fails (debug) and go on; `beforeBreadcrumb` failing keeps the breadcrumb.
+- `init` (and the Spring Boot starter) no longer throws `IllegalArgumentException` on a malformed DSN: it says so on stderr, debug or not, and the SDK stays off.
 - Logging integrations (`java.util.logging`, Logback) skip what is logged while the SDK captures, such as from `beforeSend`; `Hub.isCapturing()` says when.
 - `close(timeout)` returns within its timeout; the duplicate budget reads a message's first 1,024 characters.
 

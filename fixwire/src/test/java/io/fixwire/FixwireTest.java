@@ -80,6 +80,36 @@ class FixwireTest {
   }
 
   @Test
+  void aMalformedDsnIsReportedAndTheSdkStaysOff() {
+    // init never throws: a typo in configuration can't stop the app from starting. The warning
+    // goes to stderr without debug.
+    java.io.PrintStream err = System.err;
+    java.io.ByteArrayOutputStream said = new java.io.ByteArrayOutputStream();
+    String[] bad = {
+      "ingest.fixwire.io", "https://ingest.fixwire.io", "ftp://k@host", "https://@host"
+    };
+    try {
+      System.setErr(new java.io.PrintStream(said, true));
+      for (String dsn : bad) {
+        Options o = new Options();
+        o.setDsn(dsn);
+        Client c = new Client(o);
+        assertFalse(c.isEnabled(), dsn);
+        assertNull(new Hub(c, null).captureMessage("x", null), dsn);
+      }
+      Fixwire.init(o -> o.setDsn("https://k@ingest.fixwire.io:port"));
+      assertFalse(Fixwire.isEnabled());
+      assertNull(Fixwire.captureMessage("x"));
+    } finally {
+      System.setErr(err);
+      Fixwire.close(0);
+    }
+    String warning = "fixwire: the DSN must look like https://<key>@<host>; Fixwire is off";
+    assertEquals(
+        bad.length + 1L, said.toString().lines().filter(warning::equals).count(), said.toString());
+  }
+
+  @Test
   void capturesExceptionsWithTheirCauses() {
     Options o = new Options();
     o.setRelease("shop@1.2.0");
@@ -253,6 +283,58 @@ class FixwireTest {
           kv(logRecords(raw.requests("/v1/logs")).get(0).get("attributes"))
               .get("exception.message"));
     }
+  }
+
+  @Test
+  void masksTheAppsDataButNotItsOwnConfiguration() {
+    // Release, environment, service, host and monitor are the app's configuration: cut to
+    // maxValueLength and sent as given, though they look like emails (masking them would break
+    // release health). Feedback and span names are the app's data: masked, then cut.
+    Options o = new Options();
+    o.setMaxValueLength(40);
+    o.setTracesSampleRate(1);
+    o.setRelease("api@1.2.3.example");
+    o.setEnvironment("ops@corp.example");
+    o.setServiceName("svc@corp.example");
+    o.setServerName("web@corp.example." + "h".repeat(40));
+    Hub hub = ingest.hub(o);
+    hub.startRequestSession().run();
+    hub.captureMessage("hello", null);
+    hub.getClient()
+        .captureCheckIn(new CheckIn("job@corp.example-" + "x".repeat(40), CheckIn.Status.OK));
+    Feedback f = new Feedback("call ada@example.com " + "y".repeat(100));
+    f.setName("bob@example.com");
+    f.setEmail("eve@example.com");
+    f.setUrl("https://shop.example/users/ada@example.com");
+    hub.captureFeedback(f);
+    hub.spanBuilder("GET /u/ada@example.com").start().close();
+    hub.flush(5000);
+
+    for (String path : new String[] {"/v1/logs", "/v1/traces"}) {
+      Map<String, Object> res = FakeIngest.resource(ingest.requests(path).get(0));
+      assertEquals("api@1.2.3.example", res.get("service.version"));
+      assertEquals("ops@corp.example", res.get("deployment.environment.name"));
+      assertEquals("svc@corp.example", res.get("service.name"));
+      assertEquals("web@corp.example." + "h".repeat(20) + "...", res.get("host.name"));
+    }
+    Map<String, Object> session = ingest.requests("/v1/sessions").get(0).body();
+    assertEquals("api@1.2.3.example", session.get("release"));
+    assertEquals("ops@corp.example", session.get("environment"));
+    // The slug's first 37 bytes and "...": 40.
+    List<FakeIngest.Received> checkIns =
+        ingest.requests("/v1/check-ins/job%40corp.example-" + "x".repeat(20) + "...");
+    assertEquals(1, checkIns.size(), ingest.requests("").toString());
+    assertEquals("ops@corp.example", checkIns.get(0).body().get("environment"));
+
+    Map<String, Object> fb = ingest.requests("/v1/feedback").get(0).body();
+    assertEquals("api@1.2.3.example", fb.get("release"));
+    assertEquals("ops@corp.example", fb.get("environment"));
+    assertEquals("call [REDACTED:email] " + "y".repeat(15) + "...", fb.get("message"));
+    assertEquals("[REDACTED:email]", fb.get("name"));
+    assertEquals("[REDACTED:email]", fb.get("email"));
+    assertEquals("https://shop.example/users/[REDACTED:...", fb.get("url"));
+    assertEquals(
+        "GET /u/[REDACTED:email]", spans(ingest.requests("/v1/traces")).get(0).get("name"));
   }
 
   @Test
@@ -532,6 +614,25 @@ class FixwireTest {
       hub.flush(5000);
       assertEquals(2, ingest.requests("/v1/logs").size());
       assertEquals(1, ingest.requests("/v1/feedback").size());
+    } finally {
+      Transport.backoffUnitMillis = 1000;
+    }
+  }
+
+  @Test
+  void sendsARequestAtMostFourTimesA429Included() {
+    Transport.backoffUnitMillis = 10;
+    try {
+      Hub hub = ingest.hub(new Options());
+      // A 429 that pauses nothing still counts: 503, 429, 503, 429, and the request is dropped.
+      ingest.answer =
+          (n, path) ->
+              n % 2 == 0
+                  ? new FakeIngest.Answer(503, Map.of())
+                  : new FakeIngest.Answer(429, Map.of("Fixwire-Rate-Limits", "0:error"));
+      hub.captureMessage("lost", null);
+      assertTrue(hub.flush(5000));
+      assertEquals(4, ingest.requests("/v1/logs").size());
     } finally {
       Transport.backoffUnitMillis = 1000;
     }
@@ -1173,21 +1274,39 @@ class FixwireTest {
     Map<String, Object> attrs = kv(spans(ingest.requests("/v1/traces")).get(0).get("attributes"));
     assertEquals(Span.MAX_ATTRIBUTES, attrs.size());
 
-    // Bytes of UTF-8, not characters: "é" is two. Over the limit, or with a control character,
-    // a header is dropped whole.
+    // Bytes of UTF-8, not characters: "é" is two. Over the limit, or with a control character
+    // other than tab, a header is dropped whole.
     String state512 = "k=" + "é".repeat(255);
     String baggage8192 = "k=" + "é".repeat(4095);
     assertEquals(state512, Span.upTo(state512, Span.MAX_TRACESTATE));
     assertNull(Span.upTo(state512 + "v", Span.MAX_TRACESTATE));
     assertEquals(baggage8192, Span.upTo(baggage8192, Span.MAX_BAGGAGE));
     assertNull(Span.upTo(baggage8192 + "v", Span.MAX_BAGGAGE));
-    for (String control : new String[] {"k=v\r\nX-Injected: 1", "k=\u0000", "k=\tv", "k=\u007f"}) {
+    for (String control :
+        new String[] {
+          "k=v\r\nX-Injected: 1",
+          "k=\u0000",
+          "k=\bv",
+          "k=\u000bv",
+          "k=\u001f",
+          "k=\u007f",
+          "k=\u0085"
+        }) {
       assertNull(Span.upTo(control, Span.MAX_BAGGAGE), control);
     }
+    // A tab is W3C's list whitespace, kept; within the limit, it counts as a byte.
+    String tabbed512 = "k=v,\tl=" + "w".repeat(505);
+    assertEquals(tabbed512, Span.upTo(tabbed512, Span.MAX_TRACESTATE));
+    assertNull(Span.upTo(tabbed512 + "\t", Span.MAX_TRACESTATE));
+    assertEquals("k=\tv", Span.upTo("k=\tv", Span.MAX_BAGGAGE));
     Span tricked =
         hub.spanBuilder("GET /").continueTrace(parent, "k=v\nx: 1", baggage8192).startDetached();
     assertNull(tricked.tracestate());
     assertEquals(baggage8192, tricked.baggage());
+    Span tabs =
+        hub.spanBuilder("GET /").continueTrace(parent, "k=v,\tl=w", "a=1 ,\tb=2").startDetached();
+    assertEquals("k=v,\tl=w", tabs.tracestate());
+    assertEquals("a=1 ,\tb=2", tabs.baggage());
   }
 
   @Test

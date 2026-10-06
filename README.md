@@ -44,7 +44,8 @@ Fixwire.init {
 The DSN is your project's publishable key and the ingest host,
 `https://<key>@<host>`. Without one the SDK reads `FIXWIRE_DSN`; without
 either it does nothing. `FIXWIRE_RELEASE` and `FIXWIRE_ENVIRONMENT` work the
-same way.
+same way. `init` never throws: a malformed DSN is reported on stderr and the
+SDK stays off, so a typo can't stop the app from starting.
 
 `init` also reports exceptions no code caught (the handler that was there
 before still runs), and the JVM's shutdown waits up to two seconds for what

@@ -48,8 +48,8 @@ public final class Span implements AutoCloseable {
 
   /**
    * The longest caller's {@code tracestate} and {@code baggage} passed on, in bytes (the W3C
-   * limits); longer ones, and ones with a control character, are dropped whole rather than sent to
-   * every service called.
+   * limits); longer ones, and ones with a control character other than tab (W3C's list whitespace),
+   * are dropped whole rather than sent to every service called.
    */
   static final int MAX_TRACESTATE = 512;
 
@@ -397,13 +397,17 @@ public final class Span implements AutoCloseable {
     }
   }
 
-  /** A caller's header passed on: null when over max bytes or holding a control character. */
+  /**
+   * A caller's header passed on: null when over max bytes or holding a control character. A tab is
+   * not one here: W3C lists allow it around their members.
+   */
   static String upTo(String header, int max) {
     if (header == null || header.length() > max || Limits.utf8Length(header) > max) {
       return null;
     }
     for (int i = 0; i < header.length(); i++) {
-      if (Character.isISOControl(header.charAt(i))) {
+      char c = header.charAt(i);
+      if (c != '\t' && Character.isISOControl(c)) {
         return null;
       }
     }

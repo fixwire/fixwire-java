@@ -36,24 +36,32 @@ public final class Client {
       Collections.synchronizedMap(new WeakHashMap<Throwable, Boolean>());
 
   /**
-   * A client for the options; without a DSN it is disabled and sends nothing.
+   * A client for the options; without a DSN it is disabled and sends nothing. A malformed DSN
+   * doesn't throw: it is reported on stderr and the client is disabled, so a typo in configuration
+   * can't stop the app from starting.
    *
    * @param opts the options, defaults filled in from the environment
-   * @throws IllegalArgumentException for a malformed DSN
    */
   public Client(Options opts) {
     opts.applyDefaults();
     this.opts = opts;
     this.budget = new Budget(opts.getErrorBudget());
     this.redactor = opts.isRedact() ? Redactor.create(opts.getSensitiveKeys()) : null;
-    if (Options.empty(opts.getDsn())) {
+    Dsn dsn = null;
+    if (!Options.empty(opts.getDsn())) {
+      try {
+        dsn = Dsn.parse(opts.getDsn());
+      } catch (IllegalArgumentException e) {
+        System.err.println(e.getMessage() + "; Fixwire is off");
+      }
+    }
+    if (dsn == null) {
       enabled = false;
       transport = null;
       sessions = null;
       ticker = null;
       return;
     }
-    Dsn dsn = Dsn.parse(opts.getDsn());
     enabled = true;
     transport = new Transport(dsn, opts);
     if (opts.sessionsOn()) {
@@ -254,7 +262,9 @@ public final class Client {
       if (checkIn.getConfig() != null) {
         body.put("monitor_config", checkIn.getConfig().toMap());
       }
-      String path = "/v1/check-ins/" + CheckIn.pathSegment(checkIn.getMonitor());
+      // The app's own configuration, like the release: cut, not redacted.
+      String monitor = Limits.cut(checkIn.getMonitor(), opts.getMaxValueLength());
+      String path = "/v1/check-ins/" + CheckIn.pathSegment(monitor);
       return sendJson(path, Transport.CHECK_IN, body) ? id : null;
     } catch (RuntimeException e) {
       log("sending a check-in: %s", e);

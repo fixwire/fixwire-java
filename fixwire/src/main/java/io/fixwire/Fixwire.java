@@ -30,10 +30,10 @@ public final class Fixwire {
   private static UncaughtHandler uncaught;
 
   /**
-   * Sets up the SDK from options.
+   * Sets up the SDK from options. A malformed DSN doesn't throw: it is reported on stderr and the
+   * SDK stays off.
    *
    * @param configure sets the options
-   * @throws IllegalArgumentException for a malformed DSN
    */
   public static void init(Consumer<Options> configure) {
     Options o = new Options();
@@ -43,10 +43,9 @@ public final class Fixwire {
 
   /**
    * Sets up the SDK: the main hub gets a client for the options. A second call replaces the first's
-   * client.
+   * client. A malformed DSN doesn't throw: it is reported on stderr and the SDK stays off.
    *
    * @param options the options
-   * @throws IllegalArgumentException for a malformed DSN
    */
   public static synchronized void init(Options options) {
     Client client = new Client(options);
