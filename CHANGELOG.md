@@ -4,7 +4,7 @@ All notable changes to the Fixwire Java and Kotlin SDK are listed here. Versions
 Versioning](https://semver.org); before 1.0, a minor version may change the
 API.
 
-## [Unreleased]
+## [0.1.1] - 2026-10-06
 
 - Linear time for the error budget's fingerprint and the JWT detector: a few kilobytes of crafted text (`a@a@…`, `-eyJ-eyJ…`) stalled the capturing thread for seconds.
 - Redaction stays fast on text with many findings and on maps with many keys that mask alike.

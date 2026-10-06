@@ -23,7 +23,7 @@ public final class Client {
   /** The SDK's name and version, as {@code telemetry.sdk.*} say it. */
   static final String SDK_NAME = "fixwire.java";
 
-  static final String SDK_VERSION = "0.1.0";
+  static final String SDK_VERSION = "0.1.1";
 
   private final Options opts;
   private final boolean enabled;

@@ -40,7 +40,7 @@ Gradle (Kotlin DSL):
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("io.fixwire:fixwire:0.1.0")
+    implementation("io.fixwire:fixwire:0.1.1")
 }
 ```
 
@@ -50,7 +50,7 @@ Maven:
 <dependency>
   <groupId>io.fixwire</groupId>
   <artifactId>fixwire</artifactId>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
 </dependency>
 ```
 
@@ -211,7 +211,7 @@ Fixwire.captureFeedback(f); // a negative score opens a user_feedback issue for 
 | `java.util.logging` (in `fixwire`) | Records as breadcrumbs and events | [Logs](https://github.com/fixwire/fixwire-java#logs) |
 | Uncaught exceptions (in `fixwire`) | Reported as crashes; the handler that was there before still runs | On by default (`uncaughtExceptionHandler`) |
 
-Every module has the version of the core, `0.1.0`. Modules that hook into a
+Every module has the version of the core, `0.1.1`. Modules that hook into a
 library (OkHttp, Logback, the servlet API, kotlinx-coroutines) use the one
 your app already has.
 
@@ -220,7 +220,7 @@ your app already has.
 Gradle:
 
 ```kotlin
-implementation("io.fixwire:fixwire-spring-boot:0.1.0")
+implementation("io.fixwire:fixwire-spring-boot:0.1.1")
 ```
 
 Maven:
@@ -229,7 +229,7 @@ Maven:
 <dependency>
   <groupId>io.fixwire</groupId>
   <artifactId>fixwire-spring-boot</artifactId>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
 </dependency>
 ```
 
@@ -259,7 +259,7 @@ levels, and `fixwire.logging.enabled=false` turns that part off.
 Gradle:
 
 ```kotlin
-implementation("io.fixwire:fixwire-servlet:0.1.0")
+implementation("io.fixwire:fixwire-servlet:0.1.1")
 ```
 
 Maven:
@@ -268,7 +268,7 @@ Maven:
 <dependency>
   <groupId>io.fixwire</groupId>
   <artifactId>fixwire-servlet</artifactId>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
 </dependency>
 ```
 
@@ -290,7 +290,7 @@ mapping).
 Gradle:
 
 ```kotlin
-implementation("io.fixwire:fixwire-kotlin:0.1.0")
+implementation("io.fixwire:fixwire-kotlin:0.1.1")
 ```
 
 Maven:
@@ -299,7 +299,7 @@ Maven:
 <dependency>
   <groupId>io.fixwire</groupId>
   <artifactId>fixwire-kotlin</artifactId>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
 </dependency>
 ```
 
@@ -320,8 +320,8 @@ launch(FixwireContext()) {
 Gradle:
 
 ```kotlin
-implementation("io.fixwire:fixwire-okhttp:0.1.0")     // OkHttp
-implementation("io.fixwire:fixwire-httpclient:0.1.0") // java.net.http
+implementation("io.fixwire:fixwire-okhttp:0.1.1")     // OkHttp
+implementation("io.fixwire:fixwire-httpclient:0.1.1") // java.net.http
 ```
 
 Maven:
@@ -330,12 +330,12 @@ Maven:
 <dependency>
   <groupId>io.fixwire</groupId>
   <artifactId>fixwire-okhttp</artifactId>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
 </dependency>
 <dependency>
   <groupId>io.fixwire</groupId>
   <artifactId>fixwire-httpclient</artifactId>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
 </dependency>
 ```
 
@@ -366,7 +366,7 @@ try {
 For Logback, Gradle:
 
 ```kotlin
-implementation("io.fixwire:fixwire-logback:0.1.0")
+implementation("io.fixwire:fixwire-logback:0.1.1")
 ```
 
 Maven:
@@ -375,7 +375,7 @@ Maven:
 <dependency>
   <groupId>io.fixwire</groupId>
   <artifactId>fixwire-logback</artifactId>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
 </dependency>
 ```
 

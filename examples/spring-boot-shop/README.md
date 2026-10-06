@@ -44,7 +44,7 @@ How it is wired:
 
 ```kotlin
 // build.gradle.kts
-implementation("io.fixwire:fixwire-spring-boot:0.1.0")
+implementation("io.fixwire:fixwire-spring-boot:0.1.1")
 ```
 
 ```properties
