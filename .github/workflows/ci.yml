@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: JDK ${{ matrix.java }} (format, test, javadoc)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: [17, 21, 25] # the build's JDK; the libraries are compiled for Java 8
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - uses: gradle/actions/setup-gradle@v6
+      - name: build (every module and the examples against a fake ingest)
+        run: ./gradlew build
+
+  platforms:
+    name: JDK 21, ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v6
+      - run: ./gradlew test
+
+  spring-boot:
+    name: Spring Boot 4.0 (the oldest supported)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v6
+      - run: ./gradlew :fixwire-spring-boot:test -PspringBootVersion=4.0.0
+
+  old-java:
+    name: Java ${{ matrix.java }} (the built library)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: [8, 11]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v6
+      - name: build the library, and the smoke test for Java 8
+        run: |
+          ./gradlew :fixwire:jar
+          javac --release 8 -Xlint:-options -cp "fixwire/build/libs/fixwire-$(sed -n 's/^version=//p' gradle.properties).jar" -d build/smoke smoke/Smoke.java
+      # The tests are compiled for Java 17; on older Javas the built library is what apps run.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - run: java -cp "fixwire/build/libs/fixwire-$(sed -n 's/^version=//p' gradle.properties).jar:build/smoke" Smoke

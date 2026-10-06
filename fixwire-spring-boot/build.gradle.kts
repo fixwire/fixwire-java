@@ -1,6 +1,12 @@
 description = "Fixwire for Spring Boot: set up from application properties, requests, RestClient and RestTemplate calls, Logback"
 
-val springBoot = "org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.get()}"
+// -PspringBootVersion=… tests against another Spring Boot (CI: the oldest supported).
+val springBootVersion =
+    providers.gradleProperty("springBootVersion").getOrElse(
+        libs.versions.spring.boot
+            .get(),
+    )
+val springBoot = "org.springframework.boot:spring-boot-dependencies:$springBootVersion"
 
 dependencies {
     api(project(":fixwire-servlet"))

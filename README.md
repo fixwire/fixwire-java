@@ -1,5 +1,7 @@
 # fixwire for Java and Kotlin
 
+[![CI](https://github.com/fixwire/fixwire-java/actions/workflows/ci.yml/badge.svg)](https://github.com/fixwire/fixwire-java/actions/workflows/ci.yml)
+
 The Fixwire SDK for the JVM: errors with their causes, traces, release
 health, cron monitors and feedback. The core runs on Java 8 and newer and
 depends on nothing.
