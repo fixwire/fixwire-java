@@ -1,0 +1,4 @@
+# Text files have LF line endings on every system, Windows checkouts included.
+* text=auto eol=lf
+# Batch files stay as Gradle wrote them (CRLF): Windows runs them only so.
+*.bat -text
