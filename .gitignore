@@ -2,3 +2,8 @@
 build/
 .kotlin/
 *.class
+
+.DS_Store
+.env
+.env.*
+!.env.example
