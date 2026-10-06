@@ -16,7 +16,7 @@ API.
 - The `java.util.logging` handler skips records logged while it captures one (from `beforeSend`), which recursed until the stack overflowed.
 - The servlet filter never breaks a request or replaces the app's exception (a container hiding the headers made it fail).
 - The uncaught exception handler always runs the handler before it.
-- Every SDK keeps the same limits (sdks/PROTOCOL.md §13):
+- Every SDK keeps the same limits:
   - `maxValueLength` (default 1024): strings are at most that many bytes of UTF-8, cut where a character ends and ending in `...`; redaction runs first, over the part kept and the next 16 kB, so a private key or JWT the cut goes through is masked.
   - `maxStackFrames` (default 100) frames per exception, the newest; at most 10 exceptions in a chain, also for events built by hand.
   - Values the app gives keep their first 100 items and walk at most 10,000 containers; one that can't be read is `[Unreadable]`, NaN and the infinities are `"NaN"`, `"Infinity"`, `"-Infinity"`.

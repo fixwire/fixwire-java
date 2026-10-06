@@ -1,7 +1,7 @@
 # Nightly report (a cron job)
 
 ```sh
-FIXWIRE_DSN=https://<key>@<host> ./gradlew :examples:nightly-report:run   # from sdks/java
+FIXWIRE_DSN=https://<key>@<host> ./gradlew :examples:nightly-report:run   # from the repository root
 ```
 
 The job builds a report per account. One account (`globex`) has no

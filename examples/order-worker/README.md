@@ -1,7 +1,7 @@
 # Order worker (Kotlin coroutines)
 
 ```sh
-FIXWIRE_DSN=https://<key>@<host> ./gradlew :examples:order-worker:run   # from sdks/java
+FIXWIRE_DSN=https://<key>@<host> ./gradlew :examples:order-worker:run   # from the repository root
 ```
 
 Three workers take orders from a channel. Each order is handled in its own

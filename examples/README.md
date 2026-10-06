@@ -2,7 +2,7 @@
 
 Real apps, each with its own README. Each has a test that runs it against a
 fake ingest and checks what Fixwire receives, so they keep working
-(`./gradlew build` in `sdks/java` runs them).
+(`./gradlew build` at the repository root runs them).
 
 | Example | Shows |
 |---|---|

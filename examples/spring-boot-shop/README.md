@@ -4,7 +4,7 @@ A small Spring Boot 4 API with Fixwire set up the way a production service
 would be: the `fixwire-spring-boot` starter and a few properties, no code.
 
 ```sh
-FIXWIRE_DSN=https://<key>@<host> ./gradlew :examples:spring-boot-shop:bootRun   # from sdks/java
+FIXWIRE_DSN=https://<key>@<host> ./gradlew :examples:spring-boot-shop:bootRun   # from the repository root
 ```
 
 It listens on `:8080` and reserves stock at an inventory service
