@@ -16,7 +16,7 @@ import java.util.Set;
 import java.util.TimeZone;
 
 /**
- * The bounds on what is sent, the same in every Fixwire SDK (sdks/PROTOCOL.md §13): values the app
+ * The bounds on what is sent, the same in every Fixwire SDK (fixwire-protocol §13): values the app
  * gives bounded in depth, breadth and size, and strings cut on a character boundary after they are
  * redacted.
  */

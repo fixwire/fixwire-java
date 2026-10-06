@@ -5,7 +5,7 @@ import java.util.Locale;
 
 /**
  * Which outgoing requests carry trace headers: the URLs the trace propagation targets match
- * (sdks/PROTOCOL.md §13), compared without their user info, query and fragment.
+ * (fixwire-protocol §13), compared without their user info, query and fragment.
  */
 final class Targets {
   private Targets() {}

@@ -17,7 +17,7 @@ import java.util.TimeZone;
 
 /**
  * Release health for servers: each request is a session, counted per minute and user and sent about
- * every minute (sdks/PROTOCOL.md §5).
+ * every minute (fixwire-protocol §5).
  */
 final class Sessions {
   /** The session of the request a scope serves. */

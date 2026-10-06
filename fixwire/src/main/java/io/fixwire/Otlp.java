@@ -13,7 +13,7 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Events and spans as OTLP JSON (sdks/PROTOCOL.md §3, §4), within the limits of §13: the app's
+ * Events and spans as OTLP JSON (fixwire-protocol §3, §4), within the limits of §13: the app's
  * values bounded, every string redacted and then cut to {@link Options#getMaxValueLength}.
  */
 final class Otlp {
@@ -85,7 +85,7 @@ final class Otlp {
     return m;
   }
 
-  /** An error or a message as a log record (sdks/PROTOCOL.md §4), redacted. */
+  /** An error or a message as a log record (fixwire-protocol §4), redacted. */
   static Map<String, Object> eventRecord(Event e, Redactor redactor, Options o) {
     int max = o.getMaxValueLength();
     Map<String, Object> a = new LinkedHashMap<>();
