@@ -67,7 +67,7 @@ public final class OutgoingRequest {
    * @return the request in flight
    */
   public static OutgoingRequest start(Hub hub, String method, String url, HeaderSetter headers) {
-    String plain = withoutQuery(url);
+    String plain = url == null ? "" : withoutQuery(url);
     String m = method == null ? "GET" : method.toUpperCase(java.util.Locale.ROOT);
     Span span = null;
     try {

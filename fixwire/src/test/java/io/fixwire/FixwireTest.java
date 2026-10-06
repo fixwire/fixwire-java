@@ -385,7 +385,14 @@ class FixwireTest {
           "00-xyz-00f067aa0ba902b7-01",
           "00-00000000000000000000000000000000-00f067aa0ba902b7-01",
           "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-          "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01"
+          "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+          "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-later",
+          "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-",
+          "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
+          "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",
+          "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0x",
+          "00-4bf92f3577b34da6a3ce929d0e0e473٦-00f067aa0ba902b7-01", // an Arabic-Indic 6
+          "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-1"
         }) {
       assertNull(Span.parseTraceparent(bad), bad);
     }
@@ -626,8 +633,239 @@ class FixwireTest {
     assertEquals(Map.of("items", List.of("[Circular ~]")), a.get("order"));
     assertEquals(List.of("[Circular ~]"), ((List<?>) a.get("self")).subList(0, 1));
     assertTrue(String.valueOf(a.get("deep")).contains("[Array]"), "deep nesting is cut");
-    assertTrue(String.valueOf(a.get("broken")).startsWith("[io.fixwire.FixwireTest$"));
-    assertTrue(String.valueOf(a.get("endless")).startsWith("[io.fixwire.FixwireTest$"));
+    assertEquals("[Unreadable]", a.get("broken"));
+    assertEquals("[Unreadable]", a.get("endless"));
+  }
+
+  @Test
+  void boundsValuesInDepthBreadthAndSize() {
+    Hub hub = ingest.hub(new Options());
+    List<Object> deep = new ArrayList<>();
+    List<Object> cur = deep;
+    for (int i = 0; i < 20; i++) {
+      List<Object> next = new ArrayList<>();
+      cur.add(next);
+      cur = next;
+    }
+    List<Object> wide = new ArrayList<>();
+    for (int i = 0; i < 150; i++) {
+      wide.add(i);
+    }
+    // 1 + 100 + 100 × 100 lists kept by breadth: past 10,000 walked they are markers.
+    List<Object> big = new ArrayList<>();
+    for (int i = 0; i < 101; i++) {
+      List<Object> row = new ArrayList<>();
+      for (int j = 0; j < 101; j++) {
+        row.add(new ArrayList<>(List.of(j)));
+      }
+      big.add(row);
+    }
+    Map<String, Object> odd =
+        new java.util.AbstractMap<>() {
+          @Override
+          public java.util.Set<Map.Entry<String, Object>> entrySet() {
+            throw new java.util.ConcurrentModificationException();
+          }
+        };
+    hub.getScope().setExtra("deep", deep);
+    hub.getScope().setExtra("wide", wide);
+    hub.getScope().setExtra("big", big);
+    hub.getScope().setExtra("odd", odd);
+    hub.getScope().setExtra("numbers", List.of(Double.NaN, Double.POSITIVE_INFINITY, -1f / 0, 1.5));
+    hub.captureMessage("bounded", null);
+    hub.flush(5000);
+    Map<String, Object> a = kv(logRecords(ingest.requests("/v1/logs")).get(0).get("attributes"));
+    Object level = a.get("deep");
+    int levels = 0;
+    while (level instanceof List<?> l) {
+      levels++;
+      level = l.get(0);
+    }
+    assertEquals(10, levels, "ten levels, then a marker");
+    assertEquals("[Array]", level);
+    assertEquals(100, ((List<?>) a.get("wide")).size());
+    assertEquals(99L, ((List<?>) a.get("wide")).get(99));
+    int[] lists = new int[1];
+    int[] markers = new int[1];
+    count(a.get("big"), lists, markers);
+    assertEquals(10_000, lists[0], "the outer list and 99 rows of 1 + 100");
+    assertEquals(1, markers[0], "the last row");
+    assertEquals("[Unreadable]", a.get("odd"));
+    assertEquals(List.of("NaN", "Infinity", "-Infinity", 1.5), a.get("numbers"));
+  }
+
+  private static void count(Object v, int[] lists, int[] markers) {
+    if (v instanceof List<?> l) {
+      lists[0]++;
+      for (Object x : l) {
+        count(x, lists, markers);
+      }
+    } else if ("[Array]".equals(v)) {
+      markers[0]++;
+    }
+  }
+
+  private static long utf8(Object s) {
+    return ((String) s).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+  }
+
+  @Test
+  void cutsStringsToMaxValueLengthInUtf8Bytes() throws Exception {
+    Hub hub = ingest.hub(new Options());
+    String fits = "é".repeat(512); // 1024 bytes
+    String over = "a" + "é".repeat(512); // 1025 bytes: "é" would end past byte 1021
+    String emoji = "😀".repeat(300); // 1200 bytes: a pair is never split
+    hub.getScope().setExtra("fits", fits);
+    hub.getScope().setExtra("over", over);
+    hub.getScope().setExtra("emoji", emoji);
+    hub.getScope().setTag("k".repeat(2000), "v");
+    hub.captureMessage("x".repeat(5000), null);
+    hub.flush(5000);
+    Map<String, Object> rec = logRecords(ingest.requests("/v1/logs")).get(0);
+    Map<String, Object> a = kv(rec.get("attributes"));
+    assertEquals(fits, a.get("fits"));
+    assertEquals("a" + "é".repeat(510) + "...", a.get("over"));
+    assertEquals(1024, utf8(a.get("over")), "1021 bytes kept, and the dots");
+    assertEquals("😀".repeat(255) + "...", a.get("emoji"));
+    assertEquals(Map.of("k".repeat(1021) + "...", "v"), a.get("fixwire.tags"));
+    String body = (String) plain(cast(rec.get("body")));
+    assertEquals(1024, utf8(body));
+    assertTrue(body.endsWith("x..."));
+
+    try (FakeIngest small = new FakeIngest()) {
+      Options o = new Options();
+      o.setMaxValueLength(10);
+      Hub h = small.hub(o);
+      h.captureMessage("0123456789abc", null);
+      h.flush(5000);
+      assertEquals(
+          "0123456...", plain(cast(logRecords(small.requests("/v1/logs")).get(0).get("body"))));
+    }
+  }
+
+  @Test
+  void masksASecretTheCutGoesThrough() {
+    Hub hub = ingest.hub(new Options());
+    String key =
+        "-----BEGIN "
+            + "RSA PRIVATE KEY-----\n"
+            + "MIIEowIBAAKCAQEA".repeat(200)
+            + "\n-----END "
+            + "RSA PRIVATE KEY-----";
+    String jwt =
+        "eyJ"
+            + "hbGciOiJIUzI1NiJ9."
+            + "eyJ"
+            + "zdWIiOiIxMjM0NTY3ODkwIn0."
+            + "c2lnbmF0dXJl".repeat(300);
+    // Cut at 1,021 bytes, each would be sent unmasked: the key's BEGIN line without its END, the
+    // JWT's header and payload without the end of its signature.
+    hub.captureMessage("x".repeat(1000) + " " + key, null);
+    hub.getScope().setExtra("note", "see " + "y".repeat(1000) + " " + jwt);
+    hub.captureMessage("jwt", null);
+    hub.flush(5000);
+    List<Map<String, Object>> recs = logRecords(ingest.requests("/v1/logs"));
+    assertEquals(
+        "x".repeat(1000) + " [REDACTED:private_key]", plain(cast(recs.get(0).get("body"))));
+    assertEquals(
+        "see " + "y".repeat(1000) + " [REDACTED:jwt]",
+        kv(recs.get(1).get("attributes")).get("note"));
+  }
+
+  private static StackTraceElement[] stack(int n) {
+    StackTraceElement[] s = new StackTraceElement[n];
+    for (int i = 0; i < n; i++) {
+      s[i] =
+          new StackTraceElement("com.example.App", "call" + i, "App.java", i + 1); // newest first
+    }
+    return s;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static List<Map<String, Object>> chainOf(Map<String, Object> rec) {
+    return (List<Map<String, Object>>) kv(rec.get("attributes")).get("fixwire.exceptions");
+  }
+
+  @SuppressWarnings("unchecked")
+  private static List<Map<String, Object>> framesOf(Map<String, Object> exception) {
+    return (List<Map<String, Object>>) exception.get("frames");
+  }
+
+  @Test
+  void keepsTheNewestFramesAndTenCauses() throws Exception {
+    Hub hub = ingest.hub(new Options());
+    RuntimeException tall = new RuntimeException("tall");
+    tall.setStackTrace(stack(101));
+    hub.captureException(tall);
+    RuntimeException top = new RuntimeException("cause 0");
+    RuntimeException at = top;
+    for (int i = 1; i <= 10; i++) { // 11 deep
+      RuntimeException cause = new RuntimeException("cause " + i);
+      at.initCause(cause);
+      at = cause;
+    }
+    hub.captureException(top);
+    RuntimeException a = new RuntimeException("a");
+    RuntimeException b = new RuntimeException("b", a);
+    a.initCause(b); // a loop
+    hub.captureException(a);
+    hub.flush(5000);
+
+    List<Map<String, Object>> recs = logRecords(ingest.requests("/v1/logs"));
+    List<Map<String, Object>> frames = framesOf(chainOf(recs.get(0)).get(0));
+    assertEquals(100, frames.size());
+    assertEquals("call99", frames.get(0).get("function"), "the oldest goes");
+    assertEquals("call0", frames.get(99).get("function"), "the newest, where it threw, stays");
+    List<Map<String, Object>> chain = chainOf(recs.get(1));
+    assertEquals(10, chain.size());
+    assertEquals("cause 9", chain.get(9).get("message"));
+    assertEquals(2, chainOf(recs.get(2)).size(), "cut where it comes back");
+
+    try (FakeIngest few = new FakeIngest()) {
+      Options o = new Options();
+      o.setMaxStackFrames(3);
+      Hub h = few.hub(o);
+      h.captureException(tall);
+      h.flush(5000);
+      List<Map<String, Object>> kept =
+          framesOf(chainOf(logRecords(few.requests("/v1/logs")).get(0)).get(0));
+      assertEquals(
+          List.of("call2", "call1", "call0"), kept.stream().map(f -> f.get("function")).toList());
+    }
+  }
+
+  @Test
+  void neverThrowsIntoTheApp() {
+    Options o = new Options();
+    o.setBeforeBreadcrumb(
+        b -> {
+          throw new IllegalStateException("app bug");
+        });
+    Hub hub = ingest.hub(o);
+    RuntimeException odd =
+        new RuntimeException("odd") {
+          @Override
+          public StackTraceElement[] getStackTrace() {
+            throw new UnsupportedOperationException("no stack");
+          }
+        };
+    assertNotNull(hub.captureException(odd));
+    hub.addBreadcrumb(new Breadcrumb("cart", "kept as it was"));
+    hub.addBreadcrumb(null);
+    assertNull(hub.captureFeedback(null));
+    assertNull(hub.getClient().captureCheckIn(null));
+    OutgoingRequest.start(hub, "GET", null, (k, v) -> {}).end(200);
+    Event e = new Event();
+    e.getExceptions().add(null); // what an app may build by hand
+    assertNull(hub.captureEvent(e));
+    hub.captureMessage("after", null);
+    hub.flush(5000);
+    List<Map<String, Object>> recs = logRecords(ingest.requests("/v1/logs"));
+    assertEquals(2, recs.size());
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> crumbs =
+        (List<Map<String, Object>>) kv(recs.get(1).get("attributes")).get("fixwire.breadcrumbs");
+    assertEquals("kept as it was", crumbs.get(0).get("message"));
   }
 
   @Test
@@ -671,6 +909,248 @@ class FixwireTest {
   }
 
   @Test
+  void pausesAsTheAnswersSay() {
+    Hub hub = ingest.hub(new Options());
+    Transport t = hub.getClient().transport();
+    long now = System.currentTimeMillis();
+    assertEquals(120_000, t.answered(503, "120", null, now), "a 5xx's Retry-After");
+    assertEquals(120_000, t.pausedFor(Transport.FEEDBACK, now), "pauses all data");
+    assertEquals(0, t.answered(503, null, null, now));
+    assertEquals(0, t.answered(502, "soon", null, now), "broken: ignored");
+
+    t = ingest.hub(new Options()).getClient().transport();
+    t.answered(429, null, null, now);
+    assertEquals(60_000, t.pausedFor(Transport.SPAN, now), "a 429 alone: at least a minute");
+    t = ingest.hub(new Options()).getClient().transport();
+    assertEquals(86_400_000, t.answered(429, "86401", null, now), "a day at most");
+    assertEquals(86_400_000, t.pausedFor(Transport.LOG, now));
+    t = ingest.hub(new Options()).getClient().transport();
+    t.answered(429, "120", "30:span;made_up", now);
+    assertEquals(30_000, t.pausedFor(Transport.SPAN, now), "its rate limits say what pauses");
+    assertEquals(0, t.pausedFor(Transport.ERROR, now));
+    t.limit("99999999999999999999999999:log", now);
+    assertEquals(86_400_000, t.pausedFor(Transport.LOG, now), "however long, a day");
+
+    java.text.SimpleDateFormat http =
+        new java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", java.util.Locale.US);
+    http.setTimeZone(java.util.TimeZone.getTimeZone("GMT"));
+    long at = now - now % 1000;
+    assertEquals(90, Transport.retryAfterSeconds(http.format(new java.util.Date(at + 90_000)), at));
+    assertEquals(0, Transport.retryAfterSeconds(http.format(new java.util.Date(at - 5_000)), at));
+    assertEquals(
+        86_400, Transport.retryAfterSeconds(http.format(new java.util.Date(at + (2L << 40))), at));
+    assertEquals(-1, Transport.retryAfterSeconds("Someday, 32 Foo 2026", at));
+    assertEquals(-1, Transport.retryAfterSeconds("-5", at));
+  }
+
+  @Test
+  void retriesThreeTimesWithBackoff() {
+    Transport.backoffUnitMillis = 20;
+    try {
+      Hub hub = ingest.hub(new Options());
+      List<Long> at = java.util.Collections.synchronizedList(new ArrayList<>());
+      ingest.answer =
+          (n, path) -> {
+            at.add(System.nanoTime());
+            return new FakeIngest.Answer(500, Map.of());
+          };
+      hub.captureMessage("down", null);
+      assertTrue(hub.flush(5000));
+      assertEquals(4, at.size(), "a try and 3 retries");
+      for (int i = 1; i < 4; i++) {
+        long waited = (at.get(i) - at.get(i - 1)) / 1_000_000;
+        assertTrue(waited >= 20L << (i - 1), "retry " + i + " waited " + waited + " ms");
+      }
+
+      // A next try more than 5 minutes away is not waited for.
+      ingest.answer = (n, path) -> new FakeIngest.Answer(503, Map.of("Retry-After", "301"));
+      Hub far = ingest.hub(new Options());
+      far.captureMessage("later", null);
+      assertTimeout(Duration.ofSeconds(2), () -> assertTrue(far.flush(5000)));
+      assertEquals(5, ingest.requests("/v1/logs").size(), "dropped after its first try");
+    } finally {
+      Transport.backoffUnitMillis = 1000;
+    }
+  }
+
+  @Test
+  void queuesAtMostMaxQueueOfEachKind() throws Exception {
+    Transport.backoffUnitMillis = 10;
+    java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+    try {
+      Options o = new Options();
+      o.setMaxQueue(1);
+      o.getErrorBudget().setEnabled(false);
+      Hub hub = ingest.hub(o);
+      ingest.answer =
+          (n, path) -> {
+            if (n == 0) {
+              try {
+                release.await();
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+              }
+            }
+            return new FakeIngest.Answer(503, Map.of());
+          };
+      assertNotNull(hub.captureMessage("first", null));
+      while (ingest.requests("").isEmpty()) {
+        Thread.onSpinWait(); // the first is being sent
+      }
+      assertNotNull(hub.captureMessage("second", null), "one waits");
+      assertNull(hub.captureMessage("third", null), "two don't");
+      release.countDown();
+      assertTrue(hub.flush(5000));
+      // The first waits for its retries; the second fails while it does, and goes.
+      assertEquals(5, ingest.requests("/v1/logs").size());
+    } finally {
+      release.countDown();
+      Transport.backoffUnitMillis = 1000;
+    }
+  }
+
+  @Test
+  void closesWithinItsTimeout() {
+    Options o = new Options();
+    Hub hub = ingest.hub(o);
+    ingest.answer =
+        (n, path) -> {
+          try {
+            Thread.sleep(1500); // longer than close waits
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          return new FakeIngest.Answer(200, Map.of());
+        };
+    hub.captureMessage("slow", null);
+    long start = System.nanoTime();
+    hub.getClient().close(300);
+    long took = (System.nanoTime() - start) / 1_000_000;
+    assertTrue(took < 1000, "closed in " + took + " ms");
+  }
+
+  @Test
+  void shedsWhatMakesAnErrorTooLarge() {
+    Options o = new Options();
+    o.getErrorBudget().setEnabled(false);
+    Hub hub = ingest.hub(o);
+    String kb = "z".repeat(1000);
+    Map<String, Object> wide = new java.util.LinkedHashMap<>();
+    for (int i = 0; i < 60; i++) {
+      wide.put("k" + i, kb);
+    }
+    for (int i = 0; i < 25; i++) { // 25 × 60 kB of breadcrumbs
+      Breadcrumb b = new Breadcrumb("cart", "crumb " + i);
+      b.setData(wide);
+      hub.addBreadcrumb(b);
+    }
+    assertNotNull(hub.captureMessage("breadcrumbs go", null));
+    for (int i = 0; i < 25; i++) { // and 25 × 60 kB of contexts
+      hub.getScope().setContext("c" + i, wide);
+    }
+    assertNotNull(hub.captureMessage("contexts go too", null));
+    for (int i = 0; i < 25; i++) { // extras are not shed
+      hub.getScope().setExtra("x" + i, wide);
+    }
+    assertNull(hub.captureMessage("too large", null));
+    hub.flush(5000);
+    List<Map<String, Object>> recs = logRecords(ingest.requests("/v1/logs"));
+    assertEquals(2, recs.size());
+    Map<String, Object> first = kv(recs.get(0).get("attributes"));
+    assertFalse(first.containsKey("fixwire.breadcrumbs"));
+    Map<String, Object> second = kv(recs.get(1).get("attributes"));
+    assertFalse(second.containsKey("fixwire.breadcrumbs"));
+    assertFalse(second.containsKey("fixwire.contexts"));
+  }
+
+  @Test
+  void sendsSpansInRequestsOfAHundred() {
+    Options o = new Options();
+    o.setTracesSampleRate(1);
+    Hub hub = ingest.hub(o);
+    List<Object> mb = new ArrayList<>();
+    for (int i = 0; i < 100; i++) {
+      mb.add("q".repeat(1000));
+    }
+    try (Span root = hub.spanBuilder("batch").op("task").start()) {
+      for (int i = 0; i < 250; i++) {
+        hub.spanBuilder("item " + i).op("task").start().close();
+      }
+      Span huge = hub.spanBuilder("huge").op("task").start();
+      for (int i = 0; i < 60; i++) { // 6 MB
+        huge.setAttribute("rows." + i, mb);
+      }
+      huge.close();
+    }
+    hub.flush(5000);
+    List<FakeIngest.Received> reqs = ingest.requests("/v1/traces");
+    assertEquals(3, reqs.size());
+    assertEquals(List.of(100, 100, 51), reqs.stream().map(r -> spans(List.of(r)).size()).toList());
+    assertTrue(spans(reqs).stream().noneMatch(s -> "huge".equals(s.get("name"))), "dropped alone");
+  }
+
+  @Test
+  void countsAtMost5000UsersApart() {
+    Options o = new Options();
+    o.setRelease("shop@1.2.0");
+    Hub hub = ingest.hub(o);
+    Sessions sessions = hub.getClient().sessions();
+    long now = System.currentTimeMillis();
+    now -= now % 60_000; // one minute
+    for (int i = 0; i <= Sessions.MAX_USERS + 1; i++) {
+      sessions.record("ok", Sessions.deviceId(new User("user-" + i)), now);
+    }
+    sessions.record("ok", Sessions.deviceId(new User("user-1")), now); // counted apart already
+    hub.flush(5000);
+    List<FakeIngest.Received> reqs = ingest.requests("/v1/sessions");
+    assertEquals(2, reqs.size(), "5,001 aggregates: two requests");
+    int aggregates = 0;
+    int withoutUser = 0;
+    int total = 0;
+    for (FakeIngest.Received r : reqs) {
+      for (Object x : (List<?>) r.body().get("aggregates")) {
+        aggregates++;
+        withoutUser += ((Map<?, ?>) x).containsKey("did") ? 0 : 1;
+        total += (Integer) ((Map<?, ?>) x).get("exited");
+      }
+    }
+    assertEquals(Sessions.MAX_USERS + 1, aggregates);
+    assertEquals(1, withoutUser);
+    assertEquals(Sessions.MAX_USERS + 3, total);
+  }
+
+  @Test
+  void budgetReadsAMessagesFirst1024Characters() {
+    Event a = new Event();
+    a.setMessage("x".repeat(1024) + " order 1");
+    Event b = new Event();
+    b.setMessage("x".repeat(1024) + " a different tail");
+    Event c = new Event();
+    c.setMessage("x".repeat(1023) + "y");
+    assertEquals(Budget.issueOf(a), Budget.issueOf(b));
+    assertNotEquals(Budget.issueOf(a), Budget.issueOf(c));
+  }
+
+  @Test
+  void sendsFilteredWhereRedactionFails() {
+    Map<String, Object> m = new java.util.LinkedHashMap<>();
+    m.put("password", "hunter2");
+    m.put("note", "mail ada@example.com");
+    m.put(
+        "odd",
+        new Object() {
+          @Override
+          public String toString() {
+            throw new IllegalStateException("no string");
+          }
+        });
+    Map<String, Object> out = Limits.scrub(m, io.fixwire.internal.redact.Redactor.defaults());
+    assertEquals(
+        Map.of("password", "[Filtered]", "note", "mail [REDACTED:email]", "odd", "[Filtered]"),
+        out);
+  }
+
+  @Test
   void spansCapAttributesAndCallersHeaders() {
     Options o = new Options();
     o.setTracesSampleRate(1);
@@ -692,6 +1172,80 @@ class FixwireTest {
     hub.flush(5000);
     Map<String, Object> attrs = kv(spans(ingest.requests("/v1/traces")).get(0).get("attributes"));
     assertEquals(Span.MAX_ATTRIBUTES, attrs.size());
+
+    // Bytes of UTF-8, not characters: "é" is two. Over the limit, or with a control character,
+    // a header is dropped whole.
+    String state512 = "k=" + "é".repeat(255);
+    String baggage8192 = "k=" + "é".repeat(4095);
+    assertEquals(state512, Span.upTo(state512, Span.MAX_TRACESTATE));
+    assertNull(Span.upTo(state512 + "v", Span.MAX_TRACESTATE));
+    assertEquals(baggage8192, Span.upTo(baggage8192, Span.MAX_BAGGAGE));
+    assertNull(Span.upTo(baggage8192 + "v", Span.MAX_BAGGAGE));
+    for (String control : new String[] {"k=v\r\nX-Injected: 1", "k=\u0000", "k=\tv", "k=\u007f"}) {
+      assertNull(Span.upTo(control, Span.MAX_BAGGAGE), control);
+    }
+    Span tricked =
+        hub.spanBuilder("GET /").continueTrace(parent, "k=v\nx: 1", baggage8192).startDetached();
+    assertNull(tricked.tracestate());
+    assertEquals(baggage8192, tricked.baggage());
+  }
+
+  @Test
+  void spansCountTheirOperationAmongTheirAttributes() {
+    Options o = new Options();
+    o.setTracesSampleRate(1);
+    Hub hub = ingest.hub(o);
+    try (Span s = hub.spanBuilder("job").op("task").start()) {
+      for (int i = 0; i < 200; i++) {
+        s.setAttribute("key." + i, i);
+      }
+      s.setError("failed for ada@example.com");
+    }
+    hub.flush(5000);
+    Map<String, Object> span = spans(ingest.requests("/v1/traces")).get(0);
+    Map<String, Object> attrs = kv(span.get("attributes"));
+    assertEquals(Span.MAX_ATTRIBUTES, attrs.size());
+    assertEquals("task", attrs.get("fixwire.op"));
+    assertEquals(Map.of("code", 2, "message", "failed for [REDACTED:email]"), span.get("status"));
+  }
+
+  @Test
+  void propagatesTracesToTheTargetsOnly() {
+    List<String> targets =
+        List.of("example.com", "https://api.partner.io/v2", "internal:8443", "/relative");
+    String[][] cases = {
+      {"https://example.com/x", "true"},
+      {"https://api.example.com/x", "true"},
+      {"https://API.Example.COM/x", "true"},
+      {"http://example.com:8080/x", "true"},
+      {"https://badexample.com/x", "false"},
+      {"https://example.com.evil.net/x", "false"},
+      {"https://evil.net/?next=example.com", "false"},
+      {"https://evil.net/#example.com", "false"},
+      {"https://example.com@evil.net/x", "false"},
+      {"https://u:p@api.example.com/x", "true"},
+      {"https://api.partner.io/v2/orders?id=1", "true"},
+      {"https://user@api.partner.io/v2/orders", "true"},
+      {"https://api.partner.io/v1/orders", "false"},
+      {"https://evil.net/https://api.partner.io/v2", "false"},
+      {"https://internal:8443/x", "true"},
+      {"https://internal/x", "false"},
+      {"https://db.internal:8443/x", "true"},
+      {"/relative/x", "false"},
+      {"https://other.net/relative", "false"},
+      {"not a url", "false"}
+    };
+    Options o = new Options();
+    o.setTracePropagationTargets(targets);
+    Client c = new Client(o);
+    for (String[] tc : cases) {
+      assertEquals(Boolean.parseBoolean(tc[1]), c.shouldPropagate(tc[0]), tc[0]);
+    }
+    assertFalse(new Client(new Options()).shouldPropagate("https://example.com/"), "none");
+    o = new Options();
+    o.setTracePropagationTargets(List.of("[::1]:8080"));
+    assertTrue(new Client(o).shouldPropagate("http://[::1]:8080/x"));
+    assertFalse(new Client(o).shouldPropagate("http://[::1]:9090/x"));
   }
 
   private static ExceptionValue exception(String type, String function) {
@@ -768,6 +1322,43 @@ class FixwireTest {
     }
     hub.flush(5000);
     assertEquals(1, logRecords(ingest.requests("/v1/logs")).size());
+  }
+
+  @Test
+  void julHandlerSkipsWhatIsLoggedWhileCapturing() {
+    Logger logger = Logger.getLogger("com.example.callbacks");
+    logger.setUseParentHandlers(false);
+    FixwireHandler handler = new FixwireHandler();
+    logger.addHandler(handler);
+    Options o = new Options();
+    o.getErrorBudget().setEnabled(false);
+    o.setBeforeSend(
+        e -> {
+          logger.severe("sending " + e.getEventId()); // would be captured as an event of its own
+          return e;
+        });
+    o.setBeforeBreadcrumb(
+        b -> {
+          logger.info("keeping " + b.getMessage()); // would be a breadcrumb of its own
+          return b;
+        });
+    Hub hub = ingest.hub(o);
+    Hub.setMain(hub);
+    try {
+      hub.addBreadcrumb(new Breadcrumb("cart", "added"));
+      hub.captureMessage("direct", null);
+    } finally {
+      logger.removeHandler(handler);
+      Hub.setMain(new Hub(null, null));
+    }
+    assertFalse(Hub.isCapturing());
+    hub.flush(5000);
+    List<Map<String, Object>> recs = logRecords(ingest.requests("/v1/logs"));
+    assertEquals(1, recs.size());
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> crumbs =
+        (List<Map<String, Object>>) kv(recs.get(0).get("attributes")).get("fixwire.breadcrumbs");
+    assertEquals(1, crumbs.size());
   }
 
   @Test

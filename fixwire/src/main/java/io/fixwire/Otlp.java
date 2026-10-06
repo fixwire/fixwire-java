@@ -1,23 +1,21 @@
 package io.fixwire;
 
 import io.fixwire.internal.redact.Redactor;
-import java.lang.reflect.Array;
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Date;
-import java.util.IdentityHashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
-import java.util.TimeZone;
 
-/** Events and spans as OTLP JSON (sdks/PROTOCOL.md §3, §4). */
+/**
+ * Events and spans as OTLP JSON (sdks/PROTOCOL.md §3, §4), within the limits of §13: the app's
+ * values bounded, every string redacted and then cut to {@link Options#getMaxValueLength}.
+ */
 final class Otlp {
   private Otlp() {}
 
@@ -31,6 +29,7 @@ final class Otlp {
     a.put("telemetry.sdk.name", Client.SDK_NAME);
     a.put("telemetry.sdk.version", Client.SDK_VERSION);
     a.put("telemetry.sdk.language", "java");
+    Limits.cutAll(a, o.getMaxValueLength());
     return Collections.<String, Object>singletonMap("attributes", attributes(a));
   }
 
@@ -52,35 +51,47 @@ final class Otlp {
     return Collections.<String, Object>singletonMap("resourceLogs", Collections.singletonList(rl));
   }
 
-  /** An OTLP traces export of spans, redacted. */
-  static Map<String, Object> traces(Options o, List<Span> spans, Redactor redactor) {
-    List<Object> out = new ArrayList<>(spans.size());
-    for (Span s : spans) {
-      Map<String, Object> m = s.record();
-      @SuppressWarnings("unchecked")
-      Map<String, Object> attrs = (Map<String, Object>) m.get("attributes");
-      Object op = attrs.remove("fixwire.op");
-      Map<String, Object> plainAttrs = scrub(plainMap(attrs), redactor);
-      plainAttrs.put("fixwire.op", op);
-      m.put("attributes", attributes(plainAttrs));
-      m.put("name", mask(String.valueOf(m.get("name")), redactor));
-      out.add(m);
-    }
+  /** An OTLP traces export of span records. */
+  static Map<String, Object> traces(Options o, List<Map<String, Object>> records) {
     Map<String, Object> ss = new LinkedHashMap<>();
     ss.put("scope", scope());
-    ss.put("spans", out);
+    ss.put("spans", records);
     Map<String, Object> rs = new LinkedHashMap<>();
     rs.put("resource", resource(o));
     rs.put("scopeSpans", Collections.singletonList(ss));
     return Collections.<String, Object>singletonMap("resourceSpans", Collections.singletonList(rs));
   }
 
+  /** A span as OTLP sends it: its attributes bounded, redacted and cut, its name and status too. */
+  static Map<String, Object> spanRecord(Span s, Redactor redactor, Options o) {
+    int max = o.getMaxValueLength();
+    Map<String, Object> m = s.record();
+    @SuppressWarnings("unchecked")
+    Map<String, Object> attrs = (Map<String, Object>) m.get("attributes");
+    Object op = attrs.remove("fixwire.op");
+    Map<String, Object> plainAttrs = new LinkedHashMap<>();
+    for (Map.Entry<String, Object> a : attrs.entrySet()) {
+      plainAttrs.put(Limits.string(a.getKey()), Limits.bounded(a.getValue()));
+    }
+    plainAttrs = Limits.finish(plainAttrs, redactor, max);
+    plainAttrs.put("fixwire.op", Limits.text((String) op, redactor, max));
+    m.put("attributes", attributes(plainAttrs));
+    m.put("name", Limits.text(Limits.string(m.get("name")), redactor, max));
+    @SuppressWarnings("unchecked")
+    Map<String, Object> status = (Map<String, Object>) m.get("status");
+    if (status.get("message") != null) {
+      status.put("message", Limits.text((String) status.get("message"), redactor, max));
+    }
+    return m;
+  }
+
   /** An error or a message as a log record (sdks/PROTOCOL.md §4), redacted. */
-  static Map<String, Object> eventRecord(Event e, Redactor redactor) {
+  static Map<String, Object> eventRecord(Event e, Redactor redactor, Options o) {
+    int max = o.getMaxValueLength();
     Map<String, Object> a = new LinkedHashMap<>();
-    a.put("fixwire.tags", e.getTags());
+    a.put("fixwire.tags", Limits.bounded(e.getTags()));
     a.put("fixwire.transaction", e.getTransaction());
-    a.put("fixwire.fingerprint", e.getFingerprint());
+    a.put("fixwire.fingerprint", Limits.bounded(e.getFingerprint()));
     if (e.suppressed > 0) {
       a.put("fixwire.suppressed", e.suppressed);
     }
@@ -91,8 +102,8 @@ final class Otlp {
       a.put("user.name", u.getUsername());
       a.put("client.address", u.getIpAddress());
     }
-    a.put("fixwire.contexts", e.getContexts());
-    for (Map.Entry<String, Object> x : e.getExtra().entrySet()) {
+    a.put("fixwire.contexts", Limits.boundedEach(e.getContexts()));
+    for (Map.Entry<String, Object> x : Limits.boundedEach(e.getExtra()).entrySet()) {
       if (!a.containsKey(x.getKey())) {
         a.put(x.getKey(), x.getValue());
       }
@@ -106,7 +117,7 @@ final class Otlp {
         c.put("category", b.getCategory());
         c.put("message", b.getMessage());
         c.put("level", b.getLevel() == null ? null : b.getLevel().wireName());
-        c.put("data", b.getData());
+        c.put("data", Limits.bounded(b.getData()));
         crumbs.add(c);
       }
       a.put("fixwire.breadcrumbs", crumbs);
@@ -117,7 +128,7 @@ final class Otlp {
       a.put("url.full", r.getUrl());
       a.put("url.query", r.getQuery());
       a.put("http.route", r.getRoute());
-      for (Map.Entry<String, String> h : r.getHeaders().entrySet()) {
+      for (Map.Entry<String, Object> h : Limits.boundedEach(r.getHeaders()).entrySet()) {
         String name = h.getKey().toLowerCase(Locale.ROOT);
         a.put(
             name.equals("user-agent") ? "user_agent.original" : "http.request.header." + name,
@@ -135,7 +146,8 @@ final class Otlp {
     }
     if (e.getExceptions().isEmpty()) {
       record.put("eventName", "fixwire.message");
-      record.put("body", value(mask(e.getMessage() == null ? "" : e.getMessage(), redactor)));
+      record.put(
+          "body", value(Limits.text(e.getMessage() == null ? "" : e.getMessage(), redactor, max)));
     } else {
       record.put("eventName", "exception");
       ExceptionValue outer = e.getExceptions().get(0);
@@ -143,9 +155,11 @@ final class Otlp {
       a.put("exception.message", outer.getMessage());
       List<Object> chain = new ArrayList<>();
       boolean handled = true;
-      for (ExceptionValue x : e.getExceptions()) {
+      for (ExceptionValue x : head(e.getExceptions(), Frames.MAX_CHAIN)) {
         List<Object> frames = new ArrayList<>();
-        for (Frame f : x.getFrames()) {
+        // The newest frames, where it was thrown, are the last.
+        List<Frame> all = x.getFrames();
+        for (Frame f : all.subList(Math.max(all.size() - o.getMaxStackFrames(), 0), all.size())) {
           Map<String, Object> fm = new LinkedHashMap<>();
           fm.put("function", f.getFunction());
           fm.put("module", f.getModule());
@@ -173,115 +187,37 @@ final class Otlp {
         a.put("fixwire.handled", false);
       }
       if (e.getMessage() != null && !e.getMessage().isEmpty()) {
-        record.put("body", value(mask(e.getMessage(), redactor)));
+        record.put("body", value(Limits.text(e.getMessage(), redactor, max)));
       }
     }
     Object id = e.getEventId();
-    Map<String, Object> plain = scrub(plainMap(a), redactor);
+    Map<String, Object> plain = Limits.finish(a, redactor, max);
     plain.put("fixwire.event_id", id);
     record.put("attributes", attributes(plain));
     return record;
   }
 
-  static Map<String, Object> scrub(Map<String, Object> m, Redactor redactor) {
-    if (redactor == null) {
-      return m;
-    }
-    Object out = redactor.walk(m, new int[1]);
-    @SuppressWarnings("unchecked")
-    Map<String, Object> map =
-        out instanceof Map ? (Map<String, Object>) out : new LinkedHashMap<String, Object>();
-    return map;
-  }
-
-  static String mask(String s, Redactor redactor) {
-    return redactor == null || s == null || s.isEmpty() ? s : redactor.mask(s).text;
-  }
-
-  static Map<String, Object> plainMap(Map<String, ?> m) {
-    @SuppressWarnings("unchecked")
-    Map<String, Object> out = (Map<String, Object>) plain(m, 0);
-    return out;
-  }
-
-  private static final int MAX_DEPTH = 10;
-
-  /**
-   * A value in JSON's own types: maps with string keys, lists, strings, numbers, booleans and null.
-   * Other values become strings. Containers deeper than MAX_DEPTH become {@code [Object]} or {@code
-   * [Array]}, and one inside itself {@code [Circular ~]}: copying it would never end, and its own
-   * string could recurse until the stack overflows.
-   */
-  static Object plain(Object v, int depth) {
-    return plain(v, depth, null);
-  }
-
-  /** {@code open}: the containers being copied, around v. */
-  private static Object plain(Object v, int depth, Set<Object> open) {
-    if (v == null || v instanceof String || v instanceof Boolean || v instanceof Number) {
-      return v;
-    }
-    if (v instanceof Map || v instanceof Collection || v.getClass().isArray()) {
-      if (depth > MAX_DEPTH) {
-        return v instanceof Map ? "[Object]" : "[Array]";
-      }
-      if (open == null) {
-        open = Collections.newSetFromMap(new IdentityHashMap<Object, Boolean>());
-      }
-      if (!open.add(v)) {
-        return "[Circular ~]";
-      }
-      try {
-        return container(v, depth, open);
-      } finally {
-        open.remove(v);
-      }
-    }
-    if (depth > MAX_DEPTH) {
-      return string(v);
-    }
-    if (v instanceof Enum) {
-      return ((Enum<?>) v).name();
-    }
-    if (v instanceof Date) {
-      SimpleDateFormat iso = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
-      iso.setTimeZone(TimeZone.getTimeZone("UTC"));
-      return iso.format((Date) v);
-    }
-    return string(v); // CharSequence, Instant, UUID, …
-  }
-
-  private static Object container(Object v, int depth, Set<Object> open) {
-    if (v instanceof Map) {
-      Map<String, Object> out = new LinkedHashMap<>();
-      for (Map.Entry<?, ?> e : ((Map<?, ?>) v).entrySet()) {
-        out.put(string(e.getKey()), plain(e.getValue(), depth + 1, open));
-      }
-      return out;
-    }
-    List<Object> out = new ArrayList<>();
-    if (v instanceof Collection) {
-      for (Object e : (Collection<?>) v) {
-        out.add(plain(e, depth + 1, open));
-      }
-    } else {
-      for (int i = 0; i < Array.getLength(v); i++) {
-        out.add(plain(Array.get(v, i), depth + 1, open));
-      }
-    }
-    return out;
+  private static <T> List<T> head(List<T> l, int n) {
+    return l.size() <= n ? l : l.subList(0, n);
   }
 
   /**
-   * An object's string. One whose toString throws, or overflows the stack (entities that print each
-   * other), gives its class's name instead of failing the event.
+   * Leaves an attribute out of a record; whether it was there. An error over the size limit sheds
+   * its breadcrumbs, then its contexts.
    */
-  private static String string(Object v) {
-    try {
-      return String.valueOf(v);
-    } catch (RuntimeException | StackOverflowError e) {
-      return "[" + v.getClass().getName() + "]";
+  static boolean drop(Map<String, Object> record, String key) {
+    Object attrs = record.get("attributes");
+    if (!(attrs instanceof List)) {
+      return false;
     }
+    for (Iterator<?> it = ((List<?>) attrs).iterator(); it.hasNext(); ) {
+      Object kv = it.next();
+      if (kv instanceof Map && key.equals(((Map<?, ?>) kv).get("key"))) {
+        it.remove();
+        return true;
+      }
+    }
+    return false;
   }
 
   /** OTLP key-values, empty values left out. */
@@ -306,9 +242,10 @@ final class Otlp {
         || v instanceof Map && ((Map<?, ?>) v).isEmpty();
   }
 
-  /** A value as an OTLP AnyValue. */
-  static Map<String, Object> value(Object v) {
-    Object p = plain(v, 0);
+  /**
+   * A plain value (maps with string keys, lists, strings, numbers, booleans) as an OTLP AnyValue.
+   */
+  static Map<String, Object> value(Object p) {
     if (p == null) {
       return Collections.<String, Object>singletonMap("stringValue", "");
     }
@@ -331,7 +268,7 @@ final class Otlp {
       double d =
           p instanceof BigDecimal ? ((BigDecimal) p).doubleValue() : ((Number) p).doubleValue();
       if (Double.isNaN(d) || Double.isInfinite(d)) {
-        return Collections.<String, Object>singletonMap("stringValue", p.toString());
+        return Collections.<String, Object>singletonMap("stringValue", Limits.number(d).toString());
       }
       return Collections.<String, Object>singletonMap("doubleValue", d);
     }
@@ -343,9 +280,12 @@ final class Otlp {
       return Collections.<String, Object>singletonMap(
           "arrayValue", Collections.<String, Object>singletonMap("values", values));
     }
-    @SuppressWarnings("unchecked")
-    Map<String, Object> map = (Map<String, Object>) p;
-    return Collections.<String, Object>singletonMap(
-        "kvlistValue", Collections.<String, Object>singletonMap("values", attributes(map)));
+    if (p instanceof Map) {
+      @SuppressWarnings("unchecked")
+      Map<String, Object> map = (Map<String, Object>) p;
+      return Collections.<String, Object>singletonMap(
+          "kvlistValue", Collections.<String, Object>singletonMap("values", attributes(map)));
+    }
+    return value(Limits.bounded(p)); // not plain: as a value the app gave
   }
 }

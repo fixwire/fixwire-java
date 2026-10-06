@@ -25,7 +25,10 @@ public class FixwireProperties {
   /** The share of new traces kept (0: no tracing). */
   private double tracesSampleRate;
 
-  /** URLs that outgoing requests carry trace headers to (those holding one of these strings). */
+  /**
+   * Where outgoing requests carry trace headers: URL prefixes (https://api.example.com/v2) or
+   * hosts, which match their subdomains too (example.com, example.com:8443).
+   */
   private List<String> tracePropagationTargets = new ArrayList<>();
 
   /** Package prefixes of your code; by default the application's package. */

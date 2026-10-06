@@ -51,8 +51,10 @@ public final class FixwireAppender extends UnsynchronizedAppenderBase<ILoggingEv
   @Override
   protected void append(ILoggingEvent record) {
     String logger = record.getLoggerName() == null ? "" : record.getLoggerName();
-    if (logger.startsWith("io.fixwire") || !Fixwire.isEnabled()) {
-      return; // the SDK's own, or nothing to send to
+    if (logger.startsWith("io.fixwire") || Hub.isCapturing() || !Fixwire.isEnabled()) {
+      // The SDK's own, logged while it captures (from beforeSend: it would be captured again,
+      // or recurse), or nothing to send to.
+      return;
     }
     Level level = record.getLevel();
     if (!level.isGreaterOrEqual(breadcrumbLevel) && !level.isGreaterOrEqual(eventLevel)) {

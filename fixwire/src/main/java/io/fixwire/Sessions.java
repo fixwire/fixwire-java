@@ -7,10 +7,12 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TimeZone;
 
 /**
@@ -55,8 +57,17 @@ final class Sessions {
     }
   }
 
+  /**
+   * The users counted apart per send: past them, requests are counted without their user. And the
+   * aggregates a request holds.
+   */
+  static final int MAX_USERS = 5000;
+
+  static final int MAX_AGGREGATES = 5000;
+
   private final Client client;
   private Map<Key, int[]> buckets = new HashMap<>(); // exited, errored, crashed
+  private Set<String> users = new HashSet<>();
 
   Sessions(Client client) {
     this.client = client;
@@ -64,6 +75,13 @@ final class Sessions {
 
   /** Counts a request that ended. */
   synchronized void record(String status, String did, long nowMillis) {
+    if (did != null && !users.contains(did)) {
+      if (users.size() >= MAX_USERS) {
+        did = null;
+      } else {
+        users.add(did);
+      }
+    }
     Key k = new Key(nowMillis - Math.floorMod(nowMillis, 60_000L), did);
     int[] counts = buckets.get(k);
     if (counts == null) {
@@ -82,6 +100,7 @@ final class Sessions {
       }
       taken = buckets;
       buckets = new HashMap<>();
+      users = new HashSet<>();
     }
     SimpleDateFormat iso = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'");
     iso.setTimeZone(TimeZone.getTimeZone("UTC"));
@@ -96,7 +115,17 @@ final class Sessions {
       a.put("errored", e.getValue()[1]);
       a.put("crashed", e.getValue()[2]);
       aggregates.add(a);
+      if (aggregates.size() == MAX_AGGREGATES) {
+        send(aggregates);
+        aggregates = new ArrayList<>();
+      }
     }
+    if (!aggregates.isEmpty()) {
+      send(aggregates);
+    }
+  }
+
+  private void send(List<Object> aggregates) {
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("sdk", Client.sdk());
     body.put("release", client.options().getRelease());

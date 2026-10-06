@@ -11,10 +11,8 @@ import java.util.regex.Pattern;
 final class Frames {
   private Frames() {}
 
-  /** The causes followed, and the frames kept per exception (the newest). */
+  /** The causes followed. */
   static final int MAX_CHAIN = 10;
-
-  static final int MAX_FRAMES = 100;
 
   /** Packages of the JDK, Kotlin and well-known libraries: not the app's. */
   private static final String[] LIBRARIES = {
@@ -89,10 +87,20 @@ final class Frames {
       x.setMessage(message(e));
       x.setMechanism(out.isEmpty() ? mechanism : "chained");
       x.setHandled(handled);
-      x.setFrames(frames(e.getStackTrace(), opts));
+      x.setFrames(frames(stack(e), opts));
       out.add(x);
     }
     return out;
+  }
+
+  /** The throwable's stack; empty when an override fails. */
+  private static StackTraceElement[] stack(Throwable e) {
+    try {
+      StackTraceElement[] s = e.getStackTrace();
+      return s == null ? new StackTraceElement[0] : s;
+    } catch (RuntimeException ex) {
+      return new StackTraceElement[0];
+    }
   }
 
   /** The throwable's message, or "": an override that throws must not fail the capture. */
@@ -113,9 +121,12 @@ final class Frames {
     }
   }
 
-  /** Stack trace elements (the newest first) as frames, the oldest first. */
+  /**
+   * Stack trace elements (the newest first) as frames, the oldest first: the newest {@link
+   * Options#getMaxStackFrames} of them.
+   */
   static List<Frame> frames(StackTraceElement[] stack, Options opts) {
-    int n = Math.min(stack.length, MAX_FRAMES); // the newest calls are kept
+    int n = Math.min(stack.length, opts.getMaxStackFrames()); // the newest calls are kept
     List<Frame> out = new ArrayList<>(n);
     for (int i = n - 1; i >= 0; i--) {
       StackTraceElement s = stack[i];

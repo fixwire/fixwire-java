@@ -68,4 +68,38 @@ class FixwireAppenderTest {
       assertEquals("warning", later.get(later.size() - 1).get("level"));
     }
   }
+
+  @Test
+  void skipsWhatIsLoggedWhileCapturing() throws Exception {
+    org.slf4j.Logger log = LoggerFactory.getLogger("com.example.callbacks");
+    try (FakeIngest ingest = new FakeIngest()) {
+      Fixwire.init(
+          o -> {
+            o.setDsn(ingest.dsn());
+            o.setUncaughtExceptionHandler(false);
+            o.setShutdownTimeoutMillis(0);
+            o.getErrorBudget().setEnabled(false);
+            o.setBeforeSend(
+                e -> {
+                  log.error("sending {}", e.getEventId()); // an event of its own, without the guard
+                  return e;
+                });
+          });
+      LoggerContext context = (LoggerContext) LoggerFactory.getILoggerFactory();
+      FixwireAppender appender = new FixwireAppender();
+      appender.setContext(context);
+      appender.start();
+      Logger root = context.getLogger(Logger.ROOT_LOGGER_NAME);
+      root.addAppender(appender);
+      try {
+        Fixwire.captureMessage("direct");
+        log.error("logged");
+      } finally {
+        root.detachAppender(appender);
+        Fixwire.close(5000);
+      }
+      List<Map<String, Object>> recs = logRecords(ingest.requests("/v1/logs"));
+      assertEquals(2, recs.size(), recs.toString());
+    }
+  }
 }

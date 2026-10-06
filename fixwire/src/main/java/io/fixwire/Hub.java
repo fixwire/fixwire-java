@@ -173,11 +173,16 @@ public final class Hub {
     if (error == null || c == null || !c.isEnabled()) {
       return null;
     }
-    Event e = new Event();
-    e.setThrowable(error);
-    e.setExceptions(Frames.chain(error, mechanism, handled, c.options()));
-    e.setLevel(level != null ? level : handled ? null : Level.FATAL);
-    return remember(c.capture(e, getScope()));
+    try {
+      Event e = new Event();
+      e.setThrowable(error);
+      e.setExceptions(Frames.chain(error, mechanism, handled, c.options()));
+      e.setLevel(level != null ? level : handled ? null : Level.FATAL);
+      return remember(c.capture(e, getScope()));
+    } catch (RuntimeException ex) {
+      c.log("capturing an exception: %s", ex);
+      return null;
+    }
   }
 
   /**
@@ -231,16 +236,27 @@ public final class Hub {
    * @param breadcrumb the breadcrumb
    */
   public void addBreadcrumb(Breadcrumb breadcrumb) {
+    if (breadcrumb == null) {
+      return;
+    }
     Client c = client;
     int max = 100;
     if (c != null) {
       max = c.options().getMaxBreadcrumbs();
       Options.BeforeBreadcrumb before = c.options().getBeforeBreadcrumb();
       if (before != null) {
+        boolean outer = Client.CAPTURING.get() == null;
+        if (outer) {
+          Client.CAPTURING.set(Boolean.TRUE);
+        }
         try {
           breadcrumb = before.execute(breadcrumb);
         } catch (RuntimeException e) {
-          // keep the breadcrumb as it was
+          c.log("beforeBreadcrumb failed, keeping the breadcrumb as it is: %s", e);
+        } finally {
+          if (outer) {
+            Client.CAPTURING.remove();
+          }
         }
         if (breadcrumb == null) {
           return;
@@ -251,6 +267,17 @@ public final class Hub {
   }
 
   /**
+   * Whether the current thread is capturing (running {@code beforeSend} or {@code
+   * beforeBreadcrumb}, say): logging integrations skip what is logged meanwhile, which would be
+   * captured again.
+   *
+   * @return whether the thread is inside a capture
+   */
+  public static boolean isCapturing() {
+    return Client.CAPTURING.get() != null;
+  }
+
+  /**
    * Sends feedback.
    *
    * @param f the feedback
@@ -258,9 +285,18 @@ public final class Hub {
    */
   public String captureFeedback(Feedback f) {
     Client c = client;
-    if (c == null || !c.isEnabled()) {
+    if (f == null || c == null || !c.isEnabled()) {
       return null;
     }
+    try {
+      return feedback(c, f);
+    } catch (RuntimeException e) {
+      c.log("sending feedback: %s", e);
+      return null;
+    }
+  }
+
+  private String feedback(Client c, Feedback f) {
     String message = f.getMessage() == null ? "" : f.getMessage().trim();
     double score = Double.isNaN(f.getScore()) || Double.isInfinite(f.getScore()) ? 0 : f.getScore();
     score = Math.max(-1, Math.min(1, score));

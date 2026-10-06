@@ -46,8 +46,48 @@ class RedactorTest {
     assertEquals(
         "ap\u0130key access_key=[REDACTED:secret_assignment]",
         mask("ap\u0130key access_key=abcdefgh"));
-    // No prefilter literal in "access_key", so alone it is not looked at.
-    assertEquals("access_key=abcdefgh", mask("access_key=abcdefgh"));
+    // No prefilter literal in "a\u017fecret" (the server lowers \u017f to itself), so alone it is
+    // not
+    // looked at.
+    assertEquals("a\u017fecret=abcdefgh", mask("a\u017fecret=abcdefgh"));
+  }
+
+  @Test
+  void secretsGivenToCompoundNames() {
+    assertEquals(
+        "access_token=[REDACTED:secret_assignment]&client_secret=[REDACTED:secret_assignment]",
+        mask("access_token=abcdefgh&client_secret=ijklmnop"));
+    assertEquals(
+        "?X-Amz-Signature=[REDACTED:secret_assignment]&PHPSESSID=[REDACTED:secret_assignment]",
+        mask("?X-Amz-Signature=0123456789abcdef&PHPSESSID=deadbeefcafe"));
+    assertEquals("csrfToken: \"[REDACTED:secret_assignment]\"", mask("csrfToken: \"Zm9vYmFy1\""));
+    assertEquals("cb?code=[REDACTED:secret_assignment]", mask("cb?code=4/0AY0e-g7"));
+    // Counts, exit codes and words that only start with a name stay.
+    assertEquals("exit code=137 status 1", mask("exit code=137 status 1"));
+    assertEquals("secretary=Margaret tokenizer=bpe", mask("secretary=Margaret tokenizer=bpe"));
+  }
+
+  @Test
+  void secretAssignmentTakesLinearTime() {
+    // Text where each start of a name could retry the spaces, the separator or the value.
+    var inputs =
+        List.of(
+            "token" + repeat(" ", 100_000),
+            "token" + repeat(" ", 100_000) + "=" + repeat(" ", 100_000) + "x",
+            repeat("sessid", 30_000),
+            repeat("?code", 40_000),
+            repeat("?code=", 30_000),
+            repeat("token=a ", 25_000),
+            repeat("secret_", 30_000),
+            repeat("session_", 25_000),
+            repeat("password\"", 20_000),
+            repeat("api_key ' : \" x", 15_000),
+            repeat("token" + repeat("\t", 50) + "x", 4_000));
+    for (int round = 0; round < 3; round++) {
+      for (var s : inputs) {
+        assertTimeout(Duration.ofSeconds(1), () -> R.mask(s));
+      }
+    }
   }
 
   @Test

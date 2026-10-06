@@ -161,13 +161,18 @@ final class Detectors {
                       + "]{12,}+=*)",
                   1,
                   Detectors::credentialLike),
+              // A value given to a secret's name, in text, config and URLs. The name may
+              // end a longer one (access_token, client_secret, csrfToken, PHPSESSID,
+              // X-Amz-Signature); an OAuth code counts in a query or fragment only. At
+              // most one name matches at a place (none starts another one there and
+              // the next token can't go on a name), so the group is atomic: a start
+              // costs the name, the spaces after it and the value, never a retry.
               Detector.pattern(
                   "secret_assignment",
                   ANY_CASE,
-                  literals("pass", "secret", "token", "api_key", "apikey", "api-key", "pwd"),
-                  "(?i)"
-                      + EDGE
-                      + "(?:pa"
+                  literals(
+                      "pass", "pwd", "secret", "key", "token", "credential", "sess", "sig", "code"),
+                  "(?i)(?>pa"
                       + S
                       + S
                       + "word|pa"
@@ -175,22 +180,34 @@ final class Detectors {
                       + S
                       + "wd|pwd|"
                       + S
-                      + "ecret|to"
+                      + "ecret(?:[_-]?"
                       + K
-                      + "en"
-                      + "|api[_-]?"
+                      + "ey)?|private[_-]?"
+                      + K
+                      + "ey|to"
+                      + K
+                      + "en|api[_-]?"
                       + K
                       + "ey|acce"
                       + S
                       + S
                       + "[_-]?"
                       + K
-                      + "ey)"
+                      + "ey|credential"
+                      + S
+                      + "?|"
+                      + S
+                      + "e"
+                      + S
+                      + S
+                      + "(?:ion)?[_-]?id|"
+                      + S
+                      + "ig(?:nature)?|[?&#]code)"
                       + "[\"']?+"
                       + WS
                       + "*+[:=]"
                       + WS
-                      + "*+[\"']?+([^\\t\\n\\f\\r \"',;&]{6,})",
+                      + "*+[\"']?+([^\\t\\n\\f\\r \"',;&]{6,}+)",
                   1,
                   Detectors::unmasked),
               Detector.scanner("email", EXACT_CASE, literals("@"), Detectors::emailSpans, null),

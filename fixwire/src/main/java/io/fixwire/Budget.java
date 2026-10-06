@@ -125,18 +125,30 @@ final class Budget {
         parts.add(f.getModule() + "|" + f.getFunction());
       }
       if (frames.isEmpty()) {
-        parts.add(
-            VARIABLE
-                .matcher(String.valueOf(e.getExceptions().get(0).getMessage()))
-                .replaceAll("<*>"));
+        parts.add(template(e.getExceptions().get(0).getMessage()));
       }
     } else {
-      parts.add(VARIABLE.matcher(String.valueOf(e.getMessage())).replaceAll("<*>"));
+      parts.add(template(e.getMessage()));
     }
     if (!e.getFingerprint().isEmpty()) {
       parts.add(String.join("\u001f", e.getFingerprint()));
     }
     return fnv1a(String.join("\u001e", parts));
+  }
+
+  /** The read of a message: its first 1,024 characters, without the parts that vary. */
+  static final int MESSAGE_CHARS = 1024;
+
+  private static String template(String message) {
+    String m = String.valueOf(message);
+    if (m.length() > MESSAGE_CHARS) {
+      int end = MESSAGE_CHARS;
+      if (Character.isHighSurrogate(m.charAt(end - 1))) {
+        end--; // not half a character
+      }
+      m = m.substring(0, end);
+    }
+    return VARIABLE.matcher(m).replaceAll("<*>");
   }
 
   private static String fnv1a(String s) {

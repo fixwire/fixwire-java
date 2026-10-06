@@ -52,8 +52,8 @@ public final class FixwireHandler extends Handler {
       return;
     }
     String logger = record.getLoggerName() == null ? "" : record.getLoggerName();
-    if (logger.startsWith("io.fixwire") || RECORDING.get() != null) {
-      return; // the SDK's own, or logged while recording one
+    if (logger.startsWith("io.fixwire") || RECORDING.get() != null || Hub.isCapturing()) {
+      return; // the SDK's own, or logged while recording one or capturing (from beforeSend)
     }
     RECORDING.set(Boolean.TRUE);
     try {

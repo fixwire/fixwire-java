@@ -6,11 +6,15 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TimeZone;
 import java.util.concurrent.DelayQueue;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.TimeUnit;
@@ -43,7 +47,13 @@ final class Transport {
   /** The longest pause an answer can ask for (a day), so that huge numbers don't overflow. */
   static final long MAX_PAUSE_SECONDS = 24 * 3600;
 
-  /** The first retry's wait, halved (tests shorten it). */
+  /** The pause after a 429 that doesn't say which kinds of data. */
+  static final long MIN_429_PAUSE_SECONDS = 60;
+
+  /** The most of an answer's body read. */
+  static final int MAX_ANSWER_BYTES = 64 * 1024;
+
+  /** The first retry's wait, doubled for each one after it (tests shorten it). */
   static volatile long backoffUnitMillis = 1000;
 
   static final class Item implements Delayed {
@@ -80,6 +90,9 @@ final class Transport {
   private final ReentrantLock lock = new ReentrantLock();
   private final Condition drained = lock.newCondition();
   private int pending;
+  // Queued for a first try, and for another one: max_queue of each.
+  private int waiting;
+  private int retrying;
   private volatile boolean closed;
   private final Thread worker;
 
@@ -102,9 +115,10 @@ final class Transport {
     boolean full;
     lock.lock();
     try {
-      full = closed || pending >= opts.getMaxQueue();
+      full = closed || waiting >= opts.getMaxQueue();
       if (!full) {
         pending++;
+        waiting++;
       }
     } finally {
       lock.unlock();
@@ -115,6 +129,20 @@ final class Transport {
     }
     queue.add(new Item(path, category, body));
     return true;
+  }
+
+  /** Counts an item out of the queue. */
+  private void taken(Item item) {
+    lock.lock();
+    try {
+      if (item.attempts == 0) {
+        waiting--;
+      } else {
+        retrying--;
+      }
+    } finally {
+      lock.unlock();
+    }
   }
 
   private void done() {
@@ -129,9 +157,23 @@ final class Transport {
     }
   }
 
-  private void later(Item item, long millis) {
+  /** Queues an item again; false (and it is dropped) when max_queue retries wait already. */
+  private boolean later(Item item, long millis) {
+    lock.lock();
+    try {
+      if (item.attempts == 0) {
+        waiting++; // paused before its first try
+      } else if (retrying >= opts.getMaxQueue()) {
+        return false;
+      } else {
+        retrying++;
+      }
+    } finally {
+      lock.unlock();
+    }
     item.readyAt = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
     queue.add(item);
+    return true;
   }
 
   private void run() {
@@ -151,6 +193,7 @@ final class Transport {
         }
         continue;
       }
+      taken(item);
       try {
         deliver(item);
       } catch (RuntimeException e) {
@@ -167,7 +210,8 @@ final class Transport {
     }
   }
 
-  private long pausedFor(String category, long now) {
+  /** How long data of a category is paused for, in millis. */
+  long pausedFor(String category, long now) {
     lock.lock();
     try {
       Long c = pausedUntil.get(category);
@@ -184,8 +228,9 @@ final class Transport {
       if (wait > MAX_WAIT_MILLIS || closed) {
         log("dropping a %s request: paused for %d s", item.category, wait / 1000);
         done();
-      } else {
-        later(item, wait);
+      } else if (!later(item, wait)) {
+        log("dropping a %s request: the queue is full", item.category);
+        done();
       }
       return;
     }
@@ -208,8 +253,18 @@ final class Transport {
         done();
         return;
       }
-      long backoff = (1L << item.attempts) * backoffUnitMillis;
-      later(item, Math.max(backoff, retryAfter));
+      // About 1 s, then twice as long each time, or as long as Fixwire asks.
+      long backoff = (1L << (item.attempts - 1)) * backoffUnitMillis;
+      long next =
+          Math.max(
+              Math.max(backoff, retryAfter), pausedFor(item.category, System.currentTimeMillis()));
+      if (next > MAX_WAIT_MILLIS) {
+        log("dropping a %s request: its next try is %d s away", item.category, next / 1000);
+        done();
+      } else if (!later(item, next)) {
+        log("dropping a %s request: %d retries wait already", item.category, opts.getMaxQueue());
+        done();
+      }
     } else {
       log("%s request refused: %d", item.category, status);
       done();
@@ -240,27 +295,35 @@ final class Transport {
       }
       int status = c.getResponseCode();
       drain(status >= 400 ? c.getErrorStream() : c.getInputStream());
-      long now = System.currentTimeMillis();
-      long retryAfter = 0;
-      String ra = c.getHeaderField("Retry-After");
-      if (ra != null) {
-        try {
-          retryAfter = Math.min(Math.max(Long.parseLong(ra.trim()), 0), MAX_PAUSE_SECONDS) * 1000;
-        } catch (NumberFormatException ignored) {
-          // an HTTP date: the default backoff will do
-        }
-      }
-      String limits = c.getHeaderField("Fixwire-Rate-Limits");
-      limit(limits, now);
-      if (status == 429 && limits == null) {
-        limit(Math.max(retryAfter / 1000, 60) + ":", now);
-      }
+      long retryAfter =
+          answered(
+              status,
+              c.getHeaderField("Retry-After"),
+              c.getHeaderField("Fixwire-Rate-Limits"),
+              System.currentTimeMillis());
       return new long[] {status, retryAfter};
     } finally {
       c.disconnect();
     }
   }
 
+  /**
+   * Takes the pauses an answer asks for: those of {@code Fixwire-Rate-Limits}; all data for {@code
+   * Retry-After}, at least 60 s, after a 429 without it; all data for {@code Retry-After} after a
+   * 5xx. The {@code Retry-After} in millis, 0 without one.
+   */
+  long answered(int status, String retryAfter, String limits, long now) {
+    long ra = retryAfterSeconds(retryAfter, now);
+    limit(limits, now);
+    if (status == 429 && limits == null) {
+      limit(Math.max(ra, MIN_429_PAUSE_SECONDS) + ":", now);
+    } else if (status >= 500 && ra > 0) {
+      limit(ra + ":", now);
+    }
+    return Math.max(ra, 0) * 1000;
+  }
+
+  /** Reads at most {@link #MAX_ANSWER_BYTES} of an answer's body. */
   private static void drain(InputStream in) throws IOException {
     if (in == null) {
       return;
@@ -269,10 +332,48 @@ final class Transport {
       byte[] buf = new byte[4096];
       int total = 0;
       int n;
-      while (total < 64 * 1024 && (n = s.read(buf)) > 0) {
+      while (total < MAX_ANSWER_BYTES
+          && (n = s.read(buf, 0, Math.min(buf.length, MAX_ANSWER_BYTES - total))) > 0) {
         total += n;
       }
     }
+  }
+
+  /**
+   * {@code Retry-After} in seconds, from 0 to a day: seconds, or an HTTP date; -1 when missing or
+   * broken.
+   */
+  static long retryAfterSeconds(String header, long now) {
+    if (header == null) {
+      return -1;
+    }
+    long secs = seconds(header);
+    if (secs >= 0) {
+      return secs;
+    }
+    SimpleDateFormat http = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US);
+    http.setTimeZone(TimeZone.getTimeZone("GMT"));
+    http.setLenient(false);
+    try {
+      long at = http.parse(header.trim()).getTime();
+      return Math.min(Math.max((at - now) / 1000, 0), MAX_PAUSE_SECONDS);
+    } catch (ParseException e) {
+      return -1;
+    }
+  }
+
+  /** A number of seconds, at most a day (larger ones, however long, are a day); -1 when broken. */
+  static long seconds(String s) {
+    s = s.trim();
+    if (s.isEmpty()) {
+      return -1;
+    }
+    for (int i = 0; i < s.length(); i++) {
+      if (s.charAt(i) < '0' || s.charAt(i) > '9') {
+        return -1;
+      }
+    }
+    return s.length() > 6 ? MAX_PAUSE_SECONDS : Math.min(Long.parseLong(s), MAX_PAUSE_SECONDS);
   }
 
   /** Reads {@code <seconds>:<category;…>, …}; no categories means all. */
@@ -284,16 +385,11 @@ final class Transport {
     try {
       for (String part : header.split(",")) {
         String[] sc = part.trim().split(":", 2);
-        long secs;
-        try {
-          secs = Long.parseLong(sc[0].trim());
-        } catch (NumberFormatException e) {
-          continue;
-        }
+        long secs = seconds(sc[0]);
         if (secs <= 0) {
           continue;
         }
-        long until = now + Math.min(secs, MAX_PAUSE_SECONDS) * 1000;
+        long until = now + secs * 1000;
         String cats = sc.length > 1 ? sc[1].trim() : "";
         for (String cat : cats.isEmpty() ? new String[] {""} : cats.split(";")) {
           String c = cat.trim();
@@ -330,12 +426,19 @@ final class Transport {
     return true;
   }
 
-  /** Stops the worker; what is not sent yet is dropped. */
-  void close() {
+  /**
+   * Stops the worker, waiting for it at most the time given; what is not sent yet is dropped.
+   *
+   * @param waitMillis how long to wait for a request being sent
+   */
+  void close(long waitMillis) {
     closed = true;
     worker.interrupt();
+    if (waitMillis <= 0) {
+      return;
+    }
     try {
-      worker.join(1000);
+      worker.join(waitMillis);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }

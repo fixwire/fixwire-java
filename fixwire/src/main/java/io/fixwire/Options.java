@@ -45,6 +45,8 @@ public final class Options {
   private BeforeSend beforeSend;
   private BeforeBreadcrumb beforeBreadcrumb;
   private int maxBreadcrumbs = 100;
+  private int maxValueLength = 1024;
+  private int maxStackFrames = 100;
   private boolean sendDefaultPii;
   private boolean redact = true;
   private List<String> sensitiveKeys;
@@ -154,8 +156,13 @@ public final class Options {
   }
 
   /**
-   * The URLs outgoing requests carry trace headers to: those holding one of these strings (default
-   * none, so that no other service sees them).
+   * The URLs outgoing requests carry trace headers to (default none, so that no other service sees
+   * them). A URL is compared without its user info, query and fragment. A target with {@code ://}
+   * matches URLs that start with it ({@code https://api.example.com/v2}); any other target is a
+   * host, with a port if it has one, and matches that host and its subdomains ({@code example.com}
+   * matches {@code api.example.com}, not {@code badexample.com} or {@code example.com.evil.net}). A
+   * target starting with {@code /} names a path of the page's own origin, which servers don't have:
+   * it matches nothing.
    *
    * @return the targets
    */
@@ -195,6 +202,33 @@ public final class Options {
 
   public void setMaxBreadcrumbs(int maxBreadcrumbs) {
     this.maxBreadcrumbs = maxBreadcrumbs;
+  }
+
+  /**
+   * The longest string sent, in bytes of UTF-8 (default 1024): longer ones are cut where a
+   * character ends and end in {@code ...}, within the limit. Secrets are masked before the cut.
+   *
+   * @return the number of bytes
+   */
+  public int getMaxValueLength() {
+    return maxValueLength;
+  }
+
+  public void setMaxValueLength(int maxValueLength) {
+    this.maxValueLength = maxValueLength;
+  }
+
+  /**
+   * The frames sent per exception (default 100): the newest calls, where it was thrown.
+   *
+   * @return the number of frames
+   */
+  public int getMaxStackFrames() {
+    return maxStackFrames;
+  }
+
+  public void setMaxStackFrames(int maxStackFrames) {
+    this.maxStackFrames = maxStackFrames;
   }
 
   /**
@@ -394,6 +428,12 @@ public final class Options {
     }
     tracesSampleRate = Math.min(tracesSampleRate, 1);
     maxBreadcrumbs = Math.max(maxBreadcrumbs, 0);
+    if (maxValueLength <= 0) {
+      maxValueLength = 1024;
+    }
+    if (maxStackFrames <= 0) {
+      maxStackFrames = 100;
+    }
     if (maxQueue <= 0) {
       maxQueue = 100;
     }

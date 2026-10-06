@@ -3,7 +3,6 @@ package io.fixwire;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -48,8 +47,9 @@ public final class Span implements AutoCloseable {
   static final int MAX_ATTRIBUTES = 128;
 
   /**
-   * The longest caller's {@code tracestate} and {@code baggage} passed on (the W3C limits); longer
-   * ones are dropped rather than sent to every service called.
+   * The longest caller's {@code tracestate} and {@code baggage} passed on, in bytes (the W3C
+   * limits); longer ones, and ones with a control character, are dropped whole rather than sent to
+   * every service called.
    */
   static final int MAX_TRACESTATE = 512;
 
@@ -267,30 +267,30 @@ public final class Span implements AutoCloseable {
 
   /**
    * Reads {@code 00-<trace id>-<parent id>-<flags>}: the trace id, parent id and "1" or "0" for
-   * sampled; null when malformed.
+   * sampled; null unless it is well formed (version 00, a non-zero 32-hex trace id, a non-zero
+   * 16-hex parent id, 2-hex flags).
    */
   static String[] parseTraceparent(String h) {
     String[] p = h.trim().split("-", -1);
-    if (p.length < 4
-        || p[0].length() != 2
-        || p[0].equalsIgnoreCase("ff")
+    if (p.length != 4
+        || !p[0].equals("00")
         || p[1].length() != 32
         || p[2].length() != 16
         || p[3].length() != 2) {
       return null;
     }
-    if (!hex(p[0]) || !hex(p[1]) || !hex(p[2]) || !hex(p[3]) || zeros(p[1]) || zeros(p[2])) {
+    if (!hex(p[1]) || !hex(p[2]) || !hex(p[3]) || zeros(p[1]) || zeros(p[2])) {
       return null;
     }
     int flags = Integer.parseInt(p[3], 16);
-    return new String[] {
-      p[1].toLowerCase(Locale.ROOT), p[2].toLowerCase(Locale.ROOT), (flags & 1) == 1 ? "1" : "0"
-    };
+    return new String[] {p[1], p[2], (flags & 1) == 1 ? "1" : "0"};
   }
 
+  /** Whether s is lower-case hex, as W3C writes it (Character.digit takes other scripts' too). */
   private static boolean hex(String s) {
     for (int i = 0; i < s.length(); i++) {
-      if (Character.digit(s.charAt(i), 16) < 0) {
+      char c = s.charAt(i);
+      if (!(c >= '0' && c <= '9' || c >= 'a' && c <= 'f')) {
         return false;
       }
     }
@@ -397,8 +397,17 @@ public final class Span implements AutoCloseable {
     }
   }
 
-  private static String upTo(String header, int max) {
-    return header != null && header.length() <= max ? header : null;
+  /** A caller's header passed on: null when over max bytes or holding a control character. */
+  static String upTo(String header, int max) {
+    if (header == null || header.length() > max || Limits.utf8Length(header) > max) {
+      return null;
+    }
+    for (int i = 0; i < header.length(); i++) {
+      if (Character.isISOControl(header.charAt(i))) {
+        return null;
+      }
+    }
+    return header;
   }
 
   /**
@@ -409,7 +418,8 @@ public final class Span implements AutoCloseable {
   public synchronized void setError(Throwable error) {
     failed = true;
     if (error != null) {
-      statusMessage = error.getMessage() == null ? error.getClass().getName() : error.getMessage();
+      String message = Frames.message(error); // an override that throws must not fail the span
+      statusMessage = message.isEmpty() ? error.getClass().getName() : message;
       put(attributes, "error.type", error.getClass().getName());
     }
   }
@@ -487,6 +497,13 @@ public final class Span implements AutoCloseable {
     m.put("startTimeUnixNano", Long.toString(startNanos));
     m.put("endTimeUnixNano", Long.toString(endNanos));
     Map<String, Object> attrs = new LinkedHashMap<>(attributes);
+    if (op != null && attrs.size() >= MAX_ATTRIBUTES && !attrs.containsKey("fixwire.op")) {
+      String last = null;
+      for (String k : attrs.keySet()) {
+        last = k;
+      }
+      attrs.remove(last); // the operation counts among the 128
+    }
     attrs.put("fixwire.op", op);
     m.put("attributes", attrs);
     Map<String, Object> status = new LinkedHashMap<>();

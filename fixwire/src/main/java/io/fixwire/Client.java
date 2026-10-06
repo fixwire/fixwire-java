@@ -1,8 +1,10 @@
 package io.fixwire;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import io.fixwire.internal.Json;
 import io.fixwire.internal.redact.Redactor;
-import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -90,18 +92,28 @@ public final class Client {
   }
 
   /**
-   * Whether trace headers may go to a URL: it holds one of the trace propagation targets.
+   * Whether trace headers may go to a URL: one of the trace propagation targets matches it (see
+   * {@link Options#getTracePropagationTargets}).
    *
    * @param url the request's URL
    * @return whether to send {@code traceparent}
    */
   public boolean shouldPropagate(String url) {
-    for (String t : opts.getTracePropagationTargets()) {
-      if (t != null && !t.isEmpty() && url.contains(t)) {
-        return true;
-      }
+    try {
+      return Targets.match(opts.getTracePropagationTargets(), url);
+    } catch (RuntimeException e) {
+      return false;
     }
-    return false;
+  }
+
+  /** Set while the thread captures: logging integrations skip what is logged meanwhile. */
+  static final ThreadLocal<Boolean> CAPTURING = new ThreadLocal<>();
+
+  /** Logs to stderr in debug mode. */
+  void log(String format, Object... args) {
+    if (transport != null) {
+      transport.log(format, args);
+    }
   }
 
   /**
@@ -115,11 +127,28 @@ public final class Client {
     return t != null && captured.containsKey(t);
   }
 
-  /** Sends an event with what the scope knows: its id, or null when not sent. */
+  /** Sends an event with what the scope knows: its id, or null when not sent. Never throws. */
   String capture(Event e, Scope scope) {
     if (!enabled) {
       return null;
     }
+    boolean outer = CAPTURING.get() == null;
+    if (outer) {
+      CAPTURING.set(Boolean.TRUE);
+    }
+    try {
+      return send(e, scope);
+    } catch (RuntimeException ex) {
+      log("capturing an event: %s", ex);
+      return null;
+    } finally {
+      if (outer) {
+        CAPTURING.remove();
+      }
+    }
+  }
+
+  private String send(Event e, Scope scope) {
     if (scope != null) {
       scope.applyTo(e);
       // The session counts the error whether or not it is sent.
@@ -173,15 +202,26 @@ public final class Client {
         return null;
       }
     }
-    Map<String, Object> body;
+    byte[] body;
     try {
-      body = Otlp.logs(opts, Collections.singletonList(Otlp.eventRecord(e, redactor)));
+      Map<String, Object> record = Otlp.eventRecord(e, redactor, opts);
+      body = Json.write(Otlp.logs(opts, Collections.singletonList(record))).getBytes(UTF_8);
+      // An error or a message is at most 1 MB: past it, its breadcrumbs go, then (Java's frames
+      // carry no variables) its contexts, and then the event.
+      for (String shed : new String[] {"fixwire.breadcrumbs", "fixwire.contexts"}) {
+        if (body.length > Limits.MAX_RECORD_BYTES && Otlp.drop(record, shed)) {
+          body = Json.write(Otlp.logs(opts, Collections.singletonList(record))).getBytes(UTF_8);
+        }
+      }
     } catch (RuntimeException ex) {
       transport.log("encoding an event: %s", ex);
       return null;
     }
-    if (!transport.send(
-        "/v1/logs", Transport.ERROR, Json.write(body).getBytes(StandardCharsets.UTF_8))) {
+    if (body.length > Limits.MAX_RECORD_BYTES) {
+      transport.log("dropped an event: %d bytes", body.length);
+      return null;
+    }
+    if (!transport.send("/v1/logs", Transport.ERROR, body)) {
       return null;
     }
     return e.getEventId();
@@ -195,23 +235,31 @@ public final class Client {
    * @return its id, or null when it was not sent
    */
   public String captureCheckIn(CheckIn checkIn) {
-    if (!enabled || checkIn.getMonitor() == null || checkIn.getMonitor().trim().isEmpty()) {
+    if (!enabled
+        || checkIn == null
+        || checkIn.getMonitor() == null
+        || checkIn.getMonitor().trim().isEmpty()) {
       return null;
     }
-    String id = checkIn.getId() != null ? checkIn.getId() : Span.Ids.newId(16);
-    Map<String, Object> body = new LinkedHashMap<>();
-    body.put("sdk", sdk());
-    body.put("check_in_id", id);
-    body.put("status", checkIn.getStatus().wire);
-    body.put("environment", opts.getEnvironment());
-    if (checkIn.getDurationMillis() > 0) {
-      body.put("duration", checkIn.getDurationMillis() / 1000.0);
+    try {
+      String id = checkIn.getId() != null ? checkIn.getId() : Span.Ids.newId(16);
+      Map<String, Object> body = new LinkedHashMap<>();
+      body.put("sdk", sdk());
+      body.put("check_in_id", id);
+      body.put("status", checkIn.getStatus().wire);
+      body.put("environment", opts.getEnvironment());
+      if (checkIn.getDurationMillis() > 0) {
+        body.put("duration", checkIn.getDurationMillis() / 1000.0);
+      }
+      if (checkIn.getConfig() != null) {
+        body.put("monitor_config", checkIn.getConfig().toMap());
+      }
+      String path = "/v1/check-ins/" + CheckIn.pathSegment(checkIn.getMonitor());
+      return sendJson(path, Transport.CHECK_IN, body) ? id : null;
+    } catch (RuntimeException e) {
+      log("sending a check-in: %s", e);
+      return null;
     }
-    if (checkIn.getConfig() != null) {
-      body.put("monitor_config", checkIn.getConfig().toMap());
-    }
-    String path = "/v1/check-ins/" + CheckIn.pathSegment(checkIn.getMonitor());
-    return sendJson(path, Transport.CHECK_IN, body) ? id : null;
   }
 
   /** Sends feedback; its id, or null when it was not sent. */
@@ -233,28 +281,59 @@ public final class Client {
         kept.put(k, body.remove(k));
       }
     }
-    Map<String, Object> out = Otlp.scrub(Otlp.plainMap(body), redactor);
+    Map<String, Object> out =
+        Limits.finish(Limits.boundedEach(body), redactor, opts.getMaxValueLength());
     out.putAll(kept);
     return sendJson("/v1/feedback", Transport.FEEDBACK, out) ? id : null;
   }
 
+  /**
+   * Sends spans in requests of at most 100 spans and 5 MB; a span that can't fit in one alone is
+   * dropped.
+   */
   void sendSpans(List<Span> spans) {
     if (!enabled) {
       return;
     }
     try {
-      byte[] body = Json.write(Otlp.traces(opts, spans, redactor)).getBytes(StandardCharsets.UTF_8);
-      transport.send("/v1/traces", Transport.SPAN, body);
+      long envelope = Limits.utf8Length(Json.write(Otlp.traces(opts, new ArrayList<>())));
+      List<Map<String, Object>> batch = new ArrayList<>();
+      long size = envelope;
+      for (Span s : spans) {
+        Map<String, Object> record = Otlp.spanRecord(s, redactor, opts);
+        long n = Limits.utf8Length(Json.write(record)) + 1; // and a comma
+        if (envelope + n > Limits.MAX_REQUEST_BYTES) {
+          transport.log("dropped a span: %d bytes", n);
+          continue;
+        }
+        if (batch.size() == Limits.MAX_REQUEST_ITEMS || size + n > Limits.MAX_REQUEST_BYTES) {
+          sendSpanBatch(batch);
+          batch = new ArrayList<>();
+          size = envelope;
+        }
+        batch.add(record);
+        size += n;
+      }
+      if (!batch.isEmpty()) {
+        sendSpanBatch(batch);
+      }
     } catch (RuntimeException e) {
       transport.log("encoding spans: %s", e);
     }
   }
 
+  private void sendSpanBatch(List<Map<String, Object>> records) {
+    transport.send(
+        "/v1/traces", Transport.SPAN, Json.write(Otlp.traces(opts, records)).getBytes(UTF_8));
+  }
+
+  /** Sends a Fixwire JSON body, its strings cut to {@link Options#getMaxValueLength}. */
   boolean sendJson(String path, String category, Map<String, Object> body) {
     if (!enabled) {
       return false;
     }
-    return transport.send(path, category, Json.write(body).getBytes(StandardCharsets.UTF_8));
+    Limits.cutAll(body, opts.getMaxValueLength());
+    return transport.send(path, category, Json.write(body).getBytes(UTF_8));
   }
 
   Sessions sessions() {
@@ -293,11 +372,12 @@ public final class Client {
     if (!enabled) {
       return;
     }
+    long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(timeoutMillis, 0));
     if (ticker != null) {
       ticker.shutdownNow();
     }
     flush(timeoutMillis);
-    transport.close();
+    transport.close(TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()));
   }
 
   Transport transport() {

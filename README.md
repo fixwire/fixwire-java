@@ -132,7 +132,17 @@ try (Span span = Fixwire.startSpan("SELECT carts", "db.query")) {
 A span without a parent in the process is sent with the spans under it
 when it closes. `Fixwire.spanBuilder(name).continueTrace(traceparent,
 tracestate, baggage).start()` continues a caller's trace; its sampling
-decision holds. Trace headers go only to `setTracePropagationTargets`.
+decision holds.
+
+Trace headers go only to `setTracePropagationTargets`, which compare a URL
+without its user info, query and fragment:
+
+```java
+o.setTracePropagationTargets(List.of(
+    "https://api.example.com/v2", // URLs that start with it
+    "example.com",                // that host and its subdomains (not badexample.com)
+    "internal:8443"));            // a host on that port
+```
 
 Outgoing requests become client spans of the current trace, with an `http`
 breadcrumb each:
@@ -182,12 +192,16 @@ Fixwire.captureFeedback(f); // a negative score opens a user_feedback issue for 
 | `serviceName` | `OTEL_SERVICE_NAME`, else `api` of `api@1.4.0` | |
 | `sampleRate` | 1 | Share of errors sent |
 | `tracesSampleRate` | 0 | Share of new traces kept |
-| `tracePropagationTargets` | none | URLs that receive trace headers |
+| `tracePropagationTargets` | none | URL prefixes and hosts that receive trace headers |
 | `beforeSend`, `beforeBreadcrumb` | | Change or drop events and breadcrumbs |
 | `sendDefaultPii` | off | Send the user's IP address and identifying headers |
 | `redact`, `sensitiveKeys` | on, the server's keys | On-device masking |
 | `errorBudget` | 10 per issue, then 1 a minute; 600 a minute | |
 | `inAppIncludes`, `inAppExcludes` | all but the JDK's and known libraries' | Which frames are your code |
+| `maxBreadcrumbs` | 100 | Breadcrumbs kept, the last ones |
+| `maxValueLength` | 1024 | Longest string sent, in bytes of UTF-8 (masked first, then cut) |
+| `maxStackFrames` | 100 | Frames sent per exception, the newest |
+| `maxQueue` | 100 | Requests waiting to be sent, and as many waiting for a retry |
 | `uncaughtExceptionHandler` | on | Report exceptions nothing caught |
 | `shutdownTimeoutMillis` | 2000 | How long shutdown waits to send |
 
