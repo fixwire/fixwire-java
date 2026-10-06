@@ -5,9 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -18,8 +16,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestFactory;
 
 /**
- * The shared corpus of the Fixwire server's redaction (pkg/redact/testdata/vectors.json): this port
- * must mask every string and document exactly as the server does.
+ * The shared corpus of the Fixwire server's redaction (a copy of pkg/redact/testdata/vectors.json
+ * in fixwire/fixwire, kept identical): this port must mask every string and document exactly as the
+ * server does.
  */
 class VectorsTest {
   // Numbers decode alike on both sides, so documents compare by value.
@@ -30,31 +29,15 @@ class VectorsTest {
 
   private static final Map<String, Object> VECTORS = load();
 
-  /** The corpus, in the repository's pkg/ above this SDK, or where fixwire.vectors points. */
+  /** The corpus, next to this class on the test classpath. */
   private static Map<String, Object> load() {
-    Path file = null;
-    for (Path dir = Paths.get(System.getProperty("user.dir")).toAbsolutePath();
-        dir != null;
-        dir = dir.getParent()) {
-      Path candidate = dir.resolve("pkg/redact/testdata/vectors.json");
-      if (Files.isRegularFile(candidate)) {
-        file = candidate;
-        break;
+    try (InputStream in = VectorsTest.class.getResourceAsStream("vectors.json")) {
+      if (in == null) {
+        throw new IllegalStateException("vectors.json is not on the test classpath");
       }
-    }
-    if (file == null && System.getProperty("fixwire.vectors") != null) {
-      file = Paths.get(System.getProperty("fixwire.vectors"));
-    }
-    if (file == null) {
-      throw new IllegalStateException(
-          "pkg/redact/testdata/vectors.json not found above "
-              + System.getProperty("user.dir")
-              + "; set -Dfixwire.vectors");
-    }
-    try {
-      return map(JSON.readValue(file.toFile(), Object.class));
+      return map(JSON.readValue(in, Object.class));
     } catch (IOException e) {
-      throw new IllegalStateException("reading " + file, e);
+      throw new IllegalStateException("reading vectors.json", e);
     }
   }
 
