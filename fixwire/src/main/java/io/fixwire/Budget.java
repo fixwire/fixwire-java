@@ -15,11 +15,15 @@ final class Budget {
   private static final int MAX_ISSUES = 1024;
   private static final int TOP_FRAMES = 5;
 
-  /** Parts of a message that change between occurrences. */
+  /**
+   * Parts of a message that change between occurrences. An address is tried only where its run of
+   * characters starts, and its parts never backtrack: messages take linear time (with \S+@\S+ a few
+   * kilobytes of "a@a@…" took seconds).
+   */
   private static final Pattern VARIABLE =
       Pattern.compile(
           "\\b0x[0-9a-fA-F]+\\b|\\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\b|"
-              + "\\b[0-9a-fA-F]{16,}\\b|\\d+(?:\\.\\d+)?|\\S+@\\S+\\.\\w+");
+              + "\\b[0-9a-fA-F]{16,}\\b|\\d+(?:\\.\\d+)?|(?<![\\w.%+-])[\\w.%+-]++@[\\w-]++\\.[\\w.-]++");
 
   private static final class Bucket {
     double tokens;

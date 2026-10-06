@@ -9,10 +9,12 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.TimeZone;
 
 /** Events and spans as OTLP JSON (sdks/PROTOCOL.md §3, §4). */
@@ -206,35 +208,37 @@ final class Otlp {
 
   /**
    * A value in JSON's own types: maps with string keys, lists, strings, numbers, booleans and null.
-   * Other values become strings.
+   * Other values become strings. Containers deeper than MAX_DEPTH become {@code [Object]} or {@code
+   * [Array]}, and one inside itself {@code [Circular ~]}: copying it would never end, and its own
+   * string could recurse until the stack overflows.
    */
   static Object plain(Object v, int depth) {
+    return plain(v, depth, null);
+  }
+
+  /** {@code open}: the containers being copied, around v. */
+  private static Object plain(Object v, int depth, Set<Object> open) {
     if (v == null || v instanceof String || v instanceof Boolean || v instanceof Number) {
       return v;
     }
+    if (v instanceof Map || v instanceof Collection || v.getClass().isArray()) {
+      if (depth > MAX_DEPTH) {
+        return v instanceof Map ? "[Object]" : "[Array]";
+      }
+      if (open == null) {
+        open = Collections.newSetFromMap(new IdentityHashMap<Object, Boolean>());
+      }
+      if (!open.add(v)) {
+        return "[Circular ~]";
+      }
+      try {
+        return container(v, depth, open);
+      } finally {
+        open.remove(v);
+      }
+    }
     if (depth > MAX_DEPTH) {
-      return String.valueOf(v);
-    }
-    if (v instanceof Map) {
-      Map<String, Object> out = new LinkedHashMap<>();
-      for (Map.Entry<?, ?> e : ((Map<?, ?>) v).entrySet()) {
-        out.put(String.valueOf(e.getKey()), plain(e.getValue(), depth + 1));
-      }
-      return out;
-    }
-    if (v instanceof Collection) {
-      List<Object> out = new ArrayList<>();
-      for (Object e : (Collection<?>) v) {
-        out.add(plain(e, depth + 1));
-      }
-      return out;
-    }
-    if (v.getClass().isArray()) {
-      List<Object> out = new ArrayList<>();
-      for (int i = 0; i < Array.getLength(v); i++) {
-        out.add(plain(Array.get(v, i), depth + 1));
-      }
-      return out;
+      return string(v);
     }
     if (v instanceof Enum) {
       return ((Enum<?>) v).name();
@@ -244,7 +248,40 @@ final class Otlp {
       iso.setTimeZone(TimeZone.getTimeZone("UTC"));
       return iso.format((Date) v);
     }
-    return String.valueOf(v); // CharSequence, Instant, UUID, …
+    return string(v); // CharSequence, Instant, UUID, …
+  }
+
+  private static Object container(Object v, int depth, Set<Object> open) {
+    if (v instanceof Map) {
+      Map<String, Object> out = new LinkedHashMap<>();
+      for (Map.Entry<?, ?> e : ((Map<?, ?>) v).entrySet()) {
+        out.put(string(e.getKey()), plain(e.getValue(), depth + 1, open));
+      }
+      return out;
+    }
+    List<Object> out = new ArrayList<>();
+    if (v instanceof Collection) {
+      for (Object e : (Collection<?>) v) {
+        out.add(plain(e, depth + 1, open));
+      }
+    } else {
+      for (int i = 0; i < Array.getLength(v); i++) {
+        out.add(plain(Array.get(v, i), depth + 1, open));
+      }
+    }
+    return out;
+  }
+
+  /**
+   * An object's string. One whose toString throws, or overflows the stack (entities that print each
+   * other), gives its class's name instead of failing the event.
+   */
+  private static String string(Object v) {
+    try {
+      return String.valueOf(v);
+    } catch (RuntimeException | StackOverflowError e) {
+      return "[" + v.getClass().getName() + "]";
+    }
   }
 
   /** OTLP key-values, empty values left out. */

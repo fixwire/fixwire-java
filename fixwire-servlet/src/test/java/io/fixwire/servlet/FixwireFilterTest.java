@@ -10,17 +10,21 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import io.fixwire.FakeIngest;
 import io.fixwire.Fixwire;
 import jakarta.servlet.DispatcherType;
+import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.EnumSet;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.eclipse.jetty.ee10.servlet.FilterHolder;
 import org.eclipse.jetty.ee10.servlet.ServletContextHandler;
 import org.eclipse.jetty.ee10.servlet.ServletHolder;
 import org.eclipse.jetty.server.Server;
@@ -77,6 +81,21 @@ class FixwireFilterTest {
               }
             }),
         "/");
+    // A container that hides the headers (getHeaderNames may return null).
+    ctx.addFilter(
+        new FilterHolder(
+            (Filter)
+                (req, res, chain) ->
+                    chain.doFilter(
+                        new HttpServletRequestWrapper((HttpServletRequest) req) {
+                          @Override
+                          public Enumeration<String> getHeaderNames() {
+                            return null;
+                          }
+                        },
+                        res)),
+        "/hidden/*",
+        EnumSet.allOf(DispatcherType.class));
     ctx.addFilter(FixwireFilter.class, "/*", EnumSet.allOf(DispatcherType.class));
     server = new Server(0);
     server.setHandler(ctx);
@@ -170,5 +189,12 @@ class FixwireFilterTest {
       crashed += (Integer) a.get("crashed");
     }
     assertEquals(List.of(1, 1, 1), List.of(exited, errored, crashed));
+  }
+
+  @Test
+  void neverBreaksTheRequest() throws Exception {
+    assertEquals(200, send("GET", "/hidden/1", Map.of()));
+    Fixwire.flush(5000);
+    assertEquals(1, logRecords(ingest.requests("/v1/logs")).size());
   }
 }

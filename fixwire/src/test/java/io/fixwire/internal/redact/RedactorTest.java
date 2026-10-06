@@ -182,11 +182,40 @@ class RedactorTest {
             repeat("a.", 50_000) + "://",
             repeat("-----BEGIN PRIVATE KEY-----", 3_700),
             repeat("a@", 50_000),
-            repeat("1 ", 50_000));
+            repeat("1 ", 50_000),
+            repeat("-eyJ", 25_000));
     for (int round = 0; round < 3; round++) {
       for (var s : inputs) {
         assertTimeout(Duration.ofSeconds(1), () -> assertTrue(R.mask(s).findings.isEmpty()));
       }
     }
+  }
+
+  @Test
+  void jwtsAreFoundWhereTheServerFindsThem() {
+    String jwt = "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.c2lnbmF0dXJl";
+    assertEquals("x [REDACTED:jwt] y", mask("x " + jwt + " y"));
+    assertEquals("-[REDACTED:jwt]", mask("-eyJaaaaaaaa-eyJbbbbbbbb.eyJcccccccc.dddddddd"));
+    assertEquals("a" + jwt, mask("a" + jwt), "not at a word boundary");
+    assertEquals(
+        "eyJshort.eyJbbbbbbbb.dddddddd [REDACTED:jwt]",
+        mask("eyJshort.eyJbbbbbbbb.dddddddd " + jwt));
+  }
+
+  @Test
+  void manyFindingsAreFast() {
+    var text = repeat("ada@example.com ", 60_000);
+    assertTimeout(Duration.ofSeconds(1), () -> assertEquals(60_000, R.mask(text).findings.size()));
+    // Keys that mask alike, numbered (2) to (20000).
+    var doc = new LinkedHashMap<String, Object>();
+    for (int i = 0; i < 20_000; i++) {
+      doc.put("user" + i + "@example.com", i);
+    }
+    var count = new int[1];
+    assertTimeout(Duration.ofSeconds(1), () -> R.walk(doc, count));
+    assertEquals(20_000, count[0]);
+    assertEquals(20_000, doc.size());
+    assertEquals(0, doc.get("[REDACTED:email]"));
+    assertTrue(doc.containsKey("[REDACTED:email] (20000)"));
   }
 }

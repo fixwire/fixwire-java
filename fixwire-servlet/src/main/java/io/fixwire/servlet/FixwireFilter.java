@@ -18,6 +18,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import jakarta.servlet.http.MappingMatch;
 import java.io.IOException;
 import java.util.Collections;
+import java.util.Enumeration;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -52,14 +53,16 @@ public final class FixwireFilter implements Filter {
     req.setAttribute(SEEN, Boolean.TRUE);
     HttpServletRequest request = (HttpServletRequest) req;
     HttpServletResponse response = (HttpServletResponse) res;
-    Hub hub = Hub.current().copy();
-    Client client = hub.getClient();
-    boolean pii = client != null && client.options().isSendDefaultPii();
-    Scope scope = hub.getScope();
-    scope.setRequest(requestOf(request, pii));
-
-    try (Hub.Binding b = hub.bind()) {
-      Span span =
+    Hub hub;
+    Span span;
+    Runnable endSession;
+    try {
+      hub = Hub.current().copy();
+      Client client = hub.getClient();
+      boolean pii = client != null && client.options().isSendDefaultPii();
+      Scope scope = hub.getScope();
+      scope.setRequest(requestOf(request, pii));
+      span =
           hub.spanBuilder(request.getMethod())
               .op("http.server")
               .continueTrace(
@@ -72,13 +75,23 @@ public final class FixwireFilter implements Filter {
               .attribute("server.address", request.getServerName())
               .attribute("user_agent.original", request.getHeader("User-Agent"))
               .start();
-      Runnable endSession = hub.startRequestSession();
+      endSession = hub.startRequestSession();
+    } catch (RuntimeException e) {
+      chain.doFilter(request, response); // reporting must never break the request
+      return;
+    }
+
+    try (Hub.Binding b = hub.bind()) {
       AtomicBoolean ended = new AtomicBoolean();
       Runnable end =
           () -> {
             if (ended.compareAndSet(false, true)) {
-              finish(span, request, response.getStatus());
-              endSession.run();
+              try {
+                finish(span, request, response.getStatus());
+                endSession.run();
+              } catch (RuntimeException e) {
+                // reporting must never break the request
+              }
             }
           };
       try {
@@ -88,10 +101,14 @@ public final class FixwireFilter implements Filter {
             e instanceof ServletException && ((ServletException) e).getRootCause() != null
                 ? ((ServletException) e).getRootCause()
                 : e;
-        hub.captureException(cause, "servlet", false, null);
-        span.setError(cause);
-        finish(span, request, 500);
-        endSession.run();
+        try {
+          hub.captureException(cause, "servlet", false, null);
+          span.setError(cause);
+          finish(span, request, 500);
+          endSession.run();
+        } catch (RuntimeException reporting) {
+          // the app's exception goes on, not one of reporting it
+        }
         ended.set(true);
         throw e;
       }
@@ -173,7 +190,8 @@ public final class FixwireFilter implements Filter {
     out.setUrl(r.getRequestURL().toString());
     out.setQuery(r.getQueryString());
     out.setRouteSupplier(() -> route(r));
-    for (String name : Collections.list(r.getHeaderNames())) {
+    Enumeration<String> names = r.getHeaderNames(); // null when the container hides them
+    for (String name : names == null ? Collections.<String>emptyList() : Collections.list(names)) {
       if (pii || !Request.isSensitiveHeader(name)) {
         out.getHeaders().put(name, r.getHeader(name));
       }

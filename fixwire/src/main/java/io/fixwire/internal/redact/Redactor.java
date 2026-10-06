@@ -4,10 +4,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * Masks secrets and personal data on the device before anything is sent, with the same output as
@@ -140,7 +141,7 @@ public final class Redactor {
       return Collections.emptyList();
     }
     Detector.Text t = new Detector.Text(s);
-    List<Finding> out = null;
+    TreeMap<Integer, Finding> out = null; // by start
     for (Detector d : detectors) {
       if (!d.mayMatch(t)) {
         continue;
@@ -152,29 +153,27 @@ public final class Redactor {
           continue;
         }
         if (out == null) {
-          out = new ArrayList<>();
+          out = new TreeMap<>();
         } else if (overlaps(out, start, end)) {
           continue;
         }
-        out.add(new Finding(d.name, start, end));
+        out.put(start, new Finding(d.name, start, end));
       }
     }
     if (out == null) {
       return Collections.emptyList();
     }
-    Collections.sort(out, BY_START);
-    return out;
+    return new ArrayList<>(out.values());
   }
 
-  private static final Comparator<Finding> BY_START = (a, b) -> Integer.compare(a.start, b.start);
-
-  private static boolean overlaps(List<Finding> fs, int start, int end) {
-    for (Finding f : fs) {
-      if (start < f.end && f.start < end) {
-        return true;
-      }
-    }
-    return false;
+  /**
+   * Whether a span overlaps a finding kept. Those don't overlap each other, so the last one to
+   * start before the span ends also ends last: one lookup, where checking each finding made text
+   * with many findings quadratic.
+   */
+  private static boolean overlaps(TreeMap<Integer, Finding> fs, int start, int end) {
+    Map.Entry<Integer, Finding> before = fs.lowerEntry(end);
+    return before != null && start < before.getValue().end;
   }
 
   /** s with each finding replaced by [REDACTED:detector]. */
@@ -346,13 +345,19 @@ public final class Redactor {
     }
     if (renamed != null) {
       // Keys hold data too ({"ada@example.com": 3}). Keys that mask alike
-      // are numbered in key order: "[REDACTED:email] (2)".
+      // are numbered in key order: "[REDACTED:email] (2)". Each goes on from
+      // the number the one before it got (those below are taken), so many
+      // keys that mask alike don't each count up from 2.
       Collections.sort(renamed);
+      Map<String, Integer> last = new HashMap<>();
       for (Rename r : renamed) {
-        String key = r.masked;
-        for (int i = 2; map.containsKey(key); i++) {
-          key = r.masked + " (" + i + ")";
+        Integer from = last.get(r.masked);
+        int i = from == null ? 1 : from;
+        String key = i == 1 ? r.masked : r.masked + " (" + i + ")";
+        while (map.containsKey(key)) {
+          key = r.masked + " (" + ++i + ")";
         }
+        last.put(r.masked, i);
         map.put(key, map.get(r.key));
         map.remove(r.key);
         n[0] += r.count;

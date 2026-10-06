@@ -44,6 +44,17 @@ public final class Span implements AutoCloseable {
   /** The spans a segment keeps until it is sent. */
   static final int MAX_CHILDREN = 1000;
 
+  /** The attributes a span keeps (OpenTelemetry's default limit); later new keys are dropped. */
+  static final int MAX_ATTRIBUTES = 128;
+
+  /**
+   * The longest caller's {@code tracestate} and {@code baggage} passed on (the W3C limits); longer
+   * ones are dropped rather than sent to every service called.
+   */
+  static final int MAX_TRACESTATE = 512;
+
+  static final int MAX_BAGGAGE = 8192;
+
   private final String traceId;
   private final String spanId;
   private final String parentSpanId;
@@ -83,8 +94,8 @@ public final class Span implements AutoCloseable {
       parentSpanId = continued[1];
       sampled = "1".equals(continued[2]);
       remoteParent = true;
-      tracestate = b.tracestate;
-      baggage = b.baggage;
+      tracestate = upTo(b.tracestate, MAX_TRACESTATE);
+      baggage = upTo(b.baggage, MAX_BAGGAGE);
       segment = this;
     } else if (parent != null) {
       traceId = parent.traceId;
@@ -154,7 +165,7 @@ public final class Span implements AutoCloseable {
      * @return this builder
      */
     public Builder attribute(String key, Object value) {
-      attributes.put(key, value);
+      put(attributes, key, value);
       return this;
     }
 
@@ -268,12 +279,7 @@ public final class Span implements AutoCloseable {
         || p[3].length() != 2) {
       return null;
     }
-    if (!hex(p[0])
-        || !hex(p[1])
-        || !hex(p[2])
-        || !hex(p[3])
-        || p[1].matches("0+")
-        || p[2].matches("0+")) {
+    if (!hex(p[0]) || !hex(p[1]) || !hex(p[2]) || !hex(p[3]) || zeros(p[1]) || zeros(p[2])) {
       return null;
     }
     int flags = Integer.parseInt(p[3], 16);
@@ -285,6 +291,16 @@ public final class Span implements AutoCloseable {
   private static boolean hex(String s) {
     for (int i = 0; i < s.length(); i++) {
       if (Character.digit(s.charAt(i), 16) < 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Whether an id is all zeros, which is not a valid one (without compiling a regex each time). */
+  private static boolean zeros(String id) {
+    for (int i = 0; i < id.length(); i++) {
+      if (id.charAt(i) != '0') {
         return false;
       }
     }
@@ -366,13 +382,23 @@ public final class Span implements AutoCloseable {
   }
 
   /**
-   * Sets an attribute.
+   * Sets an attribute. A span keeps 128; past them, new keys are dropped.
    *
    * @param key the attribute
    * @param value its value
    */
   public synchronized void setAttribute(String key, Object value) {
-    attributes.put(key, value);
+    put(attributes, key, value);
+  }
+
+  private static void put(Map<String, Object> attributes, String key, Object value) {
+    if (attributes.size() < MAX_ATTRIBUTES || attributes.containsKey(key)) {
+      attributes.put(key, value);
+    }
+  }
+
+  private static String upTo(String header, int max) {
+    return header != null && header.length() <= max ? header : null;
   }
 
   /**
@@ -384,7 +410,7 @@ public final class Span implements AutoCloseable {
     failed = true;
     if (error != null) {
       statusMessage = error.getMessage() == null ? error.getClass().getName() : error.getMessage();
-      attributes.put("error.type", error.getClass().getName());
+      put(attributes, "error.type", error.getClass().getName());
     }
   }
 
@@ -489,10 +515,8 @@ public final class Span implements AutoCloseable {
       for (int i = 0; i < out.length; i++) {
         out[i] = HEX[r.nextInt(16)];
       }
-      if (new String(out).matches("0+")) {
-        out[out.length - 1] = '1'; // all zeros is not a valid id
-      }
-      return new String(out);
+      String id = new String(out);
+      return zeros(id) ? id.substring(1) + "1" : id; // all zeros is not a valid id
     }
   }
 }

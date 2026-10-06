@@ -19,6 +19,12 @@ import java.util.logging.LogRecord;
  * }</pre>
  */
 public final class FixwireHandler extends Handler {
+  /**
+   * Set while the thread records a log record: what is logged meanwhile (a beforeSend that logs) is
+   * not recorded again, which would recurse until the stack overflows.
+   */
+  private static final ThreadLocal<Boolean> RECORDING = new ThreadLocal<>();
+
   private final java.util.logging.Level breadcrumbLevel;
   private final java.util.logging.Level eventLevel;
 
@@ -46,9 +52,10 @@ public final class FixwireHandler extends Handler {
       return;
     }
     String logger = record.getLoggerName() == null ? "" : record.getLoggerName();
-    if (logger.startsWith("io.fixwire")) {
-      return; // the SDK's own
+    if (logger.startsWith("io.fixwire") || RECORDING.get() != null) {
+      return; // the SDK's own, or logged while recording one
     }
+    RECORDING.set(Boolean.TRUE);
     try {
       Hub hub = Hub.current();
       String message = format(record);
@@ -84,6 +91,8 @@ public final class FixwireHandler extends Handler {
           "fixwire: could not record a log record",
           e,
           java.util.logging.ErrorManager.WRITE_FAILURE);
+    } finally {
+      RECORDING.remove();
     }
   }
 

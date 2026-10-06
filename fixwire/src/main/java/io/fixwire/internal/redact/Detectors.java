@@ -16,9 +16,9 @@ import java.util.List;
  * are listed by hand next to Java's ASCII-only case folding. Possessive quantifiers stand where the
  * next token cannot match what they took: the same matches without backtracking.
  *
- * <p>Two of the server's patterns are scanners here (private keys, URL credentials): they find the
- * same matches, but a backtracking engine would take quadratic time on some text (seconds on 100
- * KB).
+ * <p>Three of the server's patterns are scanners here (private keys, JWTs, URL credentials): they
+ * find the same matches, but a backtracking engine would take quadratic time on some text (seconds
+ * on 100 KB).
  */
 final class Detectors {
   private Detectors() {}
@@ -130,13 +130,7 @@ final class Detectors {
                       + "|[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20})",
                   0,
                   null),
-              Detector.pattern(
-                  "jwt",
-                  EXACT_CASE,
-                  literals("eyJ"),
-                  START + "eyJ[A-Za-z0-9_-]{8,}+\\.eyJ[A-Za-z0-9_-]{8,}+\\.[A-Za-z0-9_-]{8,}",
-                  0,
-                  null),
+              Detector.scanner("jwt", EXACT_CASE, literals("eyJ"), Detectors::jwtSpans, null),
               Detector.pattern(
                   "fixwire_secret_key",
                   EXACT_CASE,
@@ -569,7 +563,7 @@ final class Detectors {
     return false;
   }
 
-  // Scanners for two of the server's patterns, finding the same leftmost
+  // Scanners for three of the server's patterns, finding the same leftmost
   // matches in linear time.
 
   /**
@@ -624,6 +618,46 @@ final class Detectors {
 
   private static boolean isUpper(char c) {
     return c >= 'A' && c <= 'Z';
+  }
+
+  /** The end of the run of base64url characters ([A-Za-z0-9_-]) from i. */
+  private static int base64UrlEnd(String s, int i) {
+    while (i < s.length() && (isWord(s.charAt(i)) || s.charAt(i) == '-')) {
+      i++;
+    }
+    return i;
+  }
+
+  /**
+   * The server's {@code \beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}}. Each part
+   * is a whole run of base64url characters, so every start inside a run that failed fails the same
+   * way and is skipped: "-eyJ" over and over took a backtracking engine seconds on 100 KB.
+   */
+  static List<int[]> jwtSpans(Detector.Text t) {
+    String s = t.s;
+    List<int[]> out = new ArrayList<>();
+    for (int start = s.indexOf("eyJ"); start >= 0; ) {
+      if (start > 0 && isWord(s.charAt(start - 1))) {
+        start = s.indexOf("eyJ", start + 1);
+        continue;
+      }
+      int header = base64UrlEnd(s, start + 3);
+      int end = -1;
+      if (header - start >= 11 && s.startsWith(".eyJ", header)) {
+        int payload = base64UrlEnd(s, header + 4);
+        if (payload - header >= 12 && s.startsWith(".", payload)) {
+          int signature = base64UrlEnd(s, payload + 1);
+          if (signature - payload >= 9) {
+            end = signature;
+          }
+        }
+      }
+      if (end >= 0) {
+        out.add(new int[] {start, end});
+      }
+      start = s.indexOf("eyJ", end >= 0 ? end : header);
+    }
+    return out;
   }
 
   private static boolean isLetter(char c) {

@@ -384,8 +384,8 @@ public final class Fixwire {
         if (c != null) {
           hub.flush(c.options().getShutdownTimeoutMillis());
         }
-      } catch (RuntimeException ignored) {
-        // reporting must never hide the crash
+      } catch (Throwable ignored) {
+        // reporting must never hide the crash (an out-of-memory crash may fail it too)
       }
       if (previous != null) {
         previous.uncaughtException(t, e);

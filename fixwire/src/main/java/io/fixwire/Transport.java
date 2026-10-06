@@ -6,11 +6,16 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.DelayQueue;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.zip.GZIPOutputStream;
 
 /**
@@ -26,10 +31,17 @@ final class Transport {
   static final String CHECK_IN = "check_in";
   static final String FEEDBACK = "feedback";
 
+  /** The kinds of data the SDK sends: pauses for others are not kept. */
+  private static final Set<String> CATEGORIES =
+      new HashSet<>(Arrays.asList("", ERROR, LOG, SPAN, SESSION, CHECK_IN, FEEDBACK));
+
   /** The sends of one request, and the longest a paused one waits. */
   static final int MAX_ATTEMPTS = 4;
 
   static final long MAX_WAIT_MILLIS = 5 * 60_000L;
+
+  /** The longest pause an answer can ask for (a day), so that huge numbers don't overflow. */
+  static final long MAX_PAUSE_SECONDS = 24 * 3600;
 
   /** The first retry's wait, halved (tests shorten it). */
   static volatile long backoffUnitMillis = 1000;
@@ -63,7 +75,10 @@ final class Transport {
   private final Options opts;
   private final DelayQueue<Item> queue = new DelayQueue<>();
   private final Map<String, Long> pausedUntil = new HashMap<>(); // category ("" for all) → millis
-  private final Object lock = new Object();
+  // A lock rather than a monitor: a virtual thread waiting in flush on
+  // Java 21 would pin its carrier thread.
+  private final ReentrantLock lock = new ReentrantLock();
+  private final Condition drained = lock.newCondition();
   private int pending;
   private volatile boolean closed;
   private final Thread worker;
@@ -84,23 +99,33 @@ final class Transport {
 
   /** Queues a request; false when the queue is full or closed. */
   boolean send(String path, String category, byte[] body) {
-    synchronized (lock) {
-      if (closed || pending >= opts.getMaxQueue()) {
-        log("dropping a %s request: %s", category, closed ? "closed" : "the queue is full");
-        return false;
+    boolean full;
+    lock.lock();
+    try {
+      full = closed || pending >= opts.getMaxQueue();
+      if (!full) {
+        pending++;
       }
-      pending++;
+    } finally {
+      lock.unlock();
+    }
+    if (full) {
+      log("dropping a %s request: %s", category, closed ? "closed" : "the queue is full");
+      return false;
     }
     queue.add(new Item(path, category, body));
     return true;
   }
 
   private void done() {
-    synchronized (lock) {
+    lock.lock();
+    try {
       pending = Math.max(pending - 1, 0);
       if (pending == 0) {
-        lock.notifyAll();
+        drained.signalAll();
       }
+    } finally {
+      lock.unlock();
     }
   }
 
@@ -133,17 +158,23 @@ final class Transport {
         done();
       }
     }
-    synchronized (lock) {
+    lock.lock();
+    try {
       pending = 0;
-      lock.notifyAll();
+      drained.signalAll();
+    } finally {
+      lock.unlock();
     }
   }
 
   private long pausedFor(String category, long now) {
-    synchronized (lock) {
+    lock.lock();
+    try {
       Long c = pausedUntil.get(category);
       Long all = pausedUntil.get("");
       return Math.max(Math.max(c == null ? 0 : c - now, all == null ? 0 : all - now), 0);
+    } finally {
+      lock.unlock();
     }
   }
 
@@ -194,6 +225,8 @@ final class Transport {
     HttpURLConnection c = (HttpURLConnection) new URL(dsn.url(item.path)).openConnection();
     try {
       c.setRequestMethod("POST");
+      // The key goes to the DSN's host only: an answer that redirects is refused, not followed.
+      c.setInstanceFollowRedirects(false);
       c.setConnectTimeout(opts.getTimeoutMillis());
       c.setReadTimeout(opts.getTimeoutMillis());
       c.setDoOutput(true);
@@ -212,7 +245,7 @@ final class Transport {
       String ra = c.getHeaderField("Retry-After");
       if (ra != null) {
         try {
-          retryAfter = Math.max(Long.parseLong(ra.trim()), 0) * 1000;
+          retryAfter = Math.min(Math.max(Long.parseLong(ra.trim()), 0), MAX_PAUSE_SECONDS) * 1000;
         } catch (NumberFormatException ignored) {
           // an HTTP date: the default backoff will do
         }
@@ -247,7 +280,8 @@ final class Transport {
     if (header == null || header.isEmpty()) {
       return;
     }
-    synchronized (lock) {
+    lock.lock();
+    try {
       for (String part : header.split(",")) {
         String[] sc = part.trim().split(":", 2);
         long secs;
@@ -259,34 +293,39 @@ final class Transport {
         if (secs <= 0) {
           continue;
         }
-        long until = now + secs * 1000;
+        long until = now + Math.min(secs, MAX_PAUSE_SECONDS) * 1000;
         String cats = sc.length > 1 ? sc[1].trim() : "";
         for (String cat : cats.isEmpty() ? new String[] {""} : cats.split(";")) {
-          Long was = pausedUntil.get(cat.trim());
-          if (was == null || until > was) {
-            pausedUntil.put(cat.trim(), until);
+          String c = cat.trim();
+          Long was = pausedUntil.get(c);
+          if (CATEGORIES.contains(c) && (was == null || until > was)) {
+            pausedUntil.put(c, until);
           }
         }
       }
+    } finally {
+      lock.unlock();
     }
   }
 
   /** Waits until every queued request is sent or dropped; false on timeout. */
   boolean flush(long timeoutMillis) {
-    long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(timeoutMillis, 0));
-    synchronized (lock) {
+    long left = TimeUnit.MILLISECONDS.toNanos(Math.max(timeoutMillis, 0));
+    lock.lock();
+    try {
       while (pending > 0) {
-        long left = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
         if (left <= 0) {
           return false;
         }
         try {
-          lock.wait(left);
+          left = drained.awaitNanos(left);
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
           return false;
         }
       }
+    } finally {
+      lock.unlock();
     }
     return true;
   }

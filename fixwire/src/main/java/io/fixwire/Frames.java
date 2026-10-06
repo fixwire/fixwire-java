@@ -81,18 +81,36 @@ final class Frames {
   static List<ExceptionValue> chain(Throwable t, String mechanism, boolean handled, Options opts) {
     List<ExceptionValue> out = new ArrayList<>();
     Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<Throwable, Boolean>());
-    for (Throwable e = t; e != null && out.size() < MAX_CHAIN && seen.add(e); e = e.getCause()) {
+    for (Throwable e = t; e != null && out.size() < MAX_CHAIN && seen.add(e); e = cause(e)) {
       ExceptionValue x = new ExceptionValue();
       String type = e.getClass().getName();
       x.setType(type);
       x.setModule(type.lastIndexOf('.') > 0 ? type.substring(0, type.lastIndexOf('.')) : "");
-      x.setMessage(e.getMessage() == null ? "" : e.getMessage());
+      x.setMessage(message(e));
       x.setMechanism(out.isEmpty() ? mechanism : "chained");
       x.setHandled(handled);
       x.setFrames(frames(e.getStackTrace(), opts));
       out.add(x);
     }
     return out;
+  }
+
+  /** The throwable's message, or "": an override that throws must not fail the capture. */
+  static String message(Throwable e) {
+    try {
+      String m = e.getMessage();
+      return m == null ? "" : m;
+    } catch (RuntimeException ex) {
+      return "";
+    }
+  }
+
+  private static Throwable cause(Throwable e) {
+    try {
+      return e.getCause();
+    } catch (RuntimeException ex) {
+      return null;
+    }
   }
 
   /** Stack trace elements (the newest first) as frames, the oldest first. */
